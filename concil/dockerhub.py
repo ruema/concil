@@ -2,20 +2,28 @@ import re
 import urllib
 import requests
 import base64
+import getpass
+from jwcrypto.common import base64url_decode, base64url_encode
 
 class DockerHub(object):
-    def __init__(self, docker_url):
+    def __init__(self, docker_url, verify=None):
         docker_url = urllib.parse.urlsplit(docker_url)
-        if docker_url.scheme != 'docker':
+        if docker_url.scheme not in ('https', 'http', 'docker', 'store'):
             raise ValueError("url must be a docker://-Url")
         self.username = docker_url.username
         self.password = docker_url.password
-        repository, _, tag = docker_url.path.partition(":") 
-        self.url = urllib.parse.urlunsplit(('https', docker_url.hostname, 'v2' + repository,'',''))
-        self.tag = tag
+        repository, _, tag = docker_url.path.partition(":")
+        if docker_url.port:
+            netloc = f"{docker_url.hostname}:{docker_url.port}"
+        else:
+            netloc = docker_url.hostname
+        scheme = docker_url.scheme if docker_url.scheme == 'http' else 'https'
+        self.repository = repository[1:] # strip /
+        self.url = urllib.parse.urlunsplit((scheme, netloc, 'v2' + repository,'',''))
+        self.tag = tag or "latest"
         self.session = requests.Session()
         self.session.proxies = {"https": ""}
-        self.session.verify = False
+        self.session.verify = verify
 
     def check_login(self, response):
         if response.status_code != 401:
@@ -25,23 +33,17 @@ class DockerHub(object):
         if not www_authenticate.startswith('Bearer'):
             raise RuntimeError()
         params = dict(re.findall('([a-z]+)="([^"]*)"', www_authenticate))
-        response2 = self.session.get(params['realm'],
-            params={
-                "service": params["service"],
-                "scope": params["scope"]
-            },
+        if not self.username:
+            self.username = urllib.parse.quote_plus(input("Username for storage:"))
+        if not self.password:
+            self.password = urllib.parse.quote_plus(getpass.getpass("Password for storage:"))
+        auth = '%s:%s' % (self.username, self.password)
+        auth = base64url_encode(auth)
+        realm = params.pop('realm')
+        response2 = self.session.get(realm,
+            params=params,
+            headers={"Authorization": "Basic %s" % auth} if self.username else {}
         )
-        if response2.status_code == 401:
-            auth = '%s:%s' % (self.username, self.password)
-            auth = base64.encodebytes(auth.encode('utf8'))
-            auth = auth.strip().decode('ASCII')
-            response2 = self.session.get(params['realm'],
-                params={
-                    "service": params["service"],
-                    "scope": params["scope"]
-                },
-                headers={"Authorization": "Basic %s" % auth}
-            )
         response2.raise_for_status()
         token = response2.json()['token']
         self.session.headers["Authorization"] = "Bearer " + token
