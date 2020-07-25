@@ -5,6 +5,7 @@ import base64
 import gzip
 import subprocess
 import shutil
+import io
 from hashlib import sha256
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -261,7 +262,6 @@ class ImageManifest:
                 layer.previous_digest: layer.unpacked_digest
                 for layer in layers
             }
-            print(digests)
             config = json.loads(self.config.read())
             config['rootfs']['diff_ids'] = [
                 digests.get(digest, digest)

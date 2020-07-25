@@ -292,6 +292,29 @@ class Root(Metafile):
         keyids = roles[role]['keyids']
         return {k: keys[k] for k in keyids}
 
+    def verify_trust_pinning(self, config):
+        if "trust_pinning" not in config:
+            # without trust_pinning, verification succeeds always
+            return
+        trust_pinning = config["trust_pinning"]
+        if "certs" in trust_pinning:
+            certs = trust_pinning["certs"]
+            if store._hub.repository in certs:
+                key_ids = certs[store._hub.repository]
+                root_keys = root.get_keys('root')
+                for key_id in key_ids:
+                    if key_id in root_keys:
+                        # TODO: validate key_id
+                        return
+                raise RuntimeError("no valid key-id")
+        if "ca" in trust_pinning:
+            cas = trust_pinning["ca"]
+            if store._hub.repository in ca:
+                # TODO: implement ca validation
+                raise NotImplementedError()
+        if trust_pinning.get("disable_tofu", False):
+            raise RuntimeError("tofu disabled")
+
 class Targets(Metafile):
     name = "targets"
 
@@ -306,7 +329,8 @@ class Targets(Metafile):
 
 
 class JsonStore(object):
-    def __init__(self, path, url, verify=None):
+    def __init__(self, path, url, config, verify=None):
+        self.config = config
         self._hub = DockerHub(url, verify=verify)
         self.path = path / self._hub.repository
 
@@ -344,9 +368,12 @@ class JsonStore(object):
             raise RuntimeError("expired")
         if hashes is not None and not metafile.check_hashes(hashes):
             raise RuntimeError()
-        if type == 'root' and cached_metafile is not None:
-            # check root signature with old root
-            metafile.verify_sign(cached_metafile)
+        if type == 'root':
+            if cached_metafile is not None:
+                # check root signature with old root
+                metafile.verify_sign(cached_metafile)
+            else:
+                metafile.verify_trust_pinning(config)
         filename.parent.mkdir(exist_ok=True, parents=True)
         filename.write_bytes(bytes)
         return metafile
@@ -387,7 +414,7 @@ class Notary(object):
             if 'root_ca' in config['remote_server']:
                 verify = config['remote_server']['root_ca']
         self._trust_dir = Path(config['trust_dir']).expanduser()
-        self._json_store = JsonStore(self._trust_dir / 'tuf', url, verify=verify)
+        self._json_store = JsonStore(self._trust_dir / 'tuf', url, config, verify=verify)
         self._private_key_store = PrivateKeyStore(self._trust_dir / 'private')
         if initialize:
             pass

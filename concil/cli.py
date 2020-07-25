@@ -12,12 +12,10 @@ def main():
     parser.add_argument('--encryption', metavar="key", nargs="+",
         help='encryption keys')
     args = parser.parse_args()
-    print(args)
     keys = []
-    for key in args.encryption:
+    for key in args.encryption or []:
         with open(key, 'rb') as inp:
             keys.append(jwk.JWK.from_pem(inp.read()))
-    print(keys)
     image = ImageManifest.from_path(getattr(args,'source-image'))
     if args.squashfs:
         for layer in image.layers:
