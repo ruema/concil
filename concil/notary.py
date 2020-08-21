@@ -230,6 +230,21 @@ def load_key(key):
         data = base64url_decode(key['keyval']['public'])
         return load_der_public_key(data, backend=default_backend())
 
+HASH_ALGORITHMS = {
+    "sha256": hashlib.sha256,
+    "sha512": hashlib.sha512,
+}
+
+def check_hashes(bytes, hashes):
+    if "length" in hashes and len(bytes) != hashes['length']:
+        return False
+    hash_found = False
+    for hash_name, hash_function in HASH_ALGORITHMS.items():
+        if hash_name in hashes["hashes"]:
+            hash_found = True
+            if hash_function(bytes).digest() != base64url_decode(hashes["hashes"][hash_name]):
+                return False
+    return hash_found
 
 class Metafile(object):
     def __init__(self, bytes):
@@ -246,13 +261,7 @@ class Metafile(object):
         return hashlib.sha256(self.bytes).hexdigest()
 
     def check_hashes(self, hashes):
-        if "length" in hashes and len(self.bytes) != hashes['length']:
-            return False
-        if "sha256" in hashes["hashes"] and hashlib.sha256(self.bytes).digest() != base64url_decode(hashes["hashes"]["sha256"]):
-            return False
-        if "sha512" in hashes["hashes"] and hashlib.sha512(self.bytes).digest() != base64url_decode(hashes["hashes"]["sha512"]):
-            return False
-        return "sha256" in hashes["hashes"] or "sha512" in hashes["hashes"]
+        return check_hashes(self.bytes, hashes)
 
     def verify_sign(self, root):
         public_keys = root.get_keys(self.name)
@@ -304,8 +313,10 @@ class Root(Metafile):
                 root_keys = root.get_keys('root')
                 for key_id in key_ids:
                     if key_id in root_keys:
-                        # TODO: validate key_id
-                        return
+                        bytes = encode_json(root_keys[key_id])
+                        hash256 = hashlib.sha256(bytes).digest()
+                        if hash256 == base64.b16decode(key_id.upper()):
+                            return
                 raise RuntimeError("no valid key-id")
         if "ca" in trust_pinning:
             cas = trust_pinning["ca"]
@@ -373,7 +384,7 @@ class JsonStore(object):
                 # check root signature with old root
                 metafile.verify_sign(cached_metafile)
             else:
-                metafile.verify_trust_pinning(config)
+                metafile.verify_trust_pinning(self.config)
         filename.parent.mkdir(exist_ok=True, parents=True)
         filename.write_bytes(bytes)
         return metafile
@@ -401,12 +412,13 @@ class Notary(object):
         },
     }
 
-    def __init__(self, url, initialize=False, config_path=CONFIG_PATH):
-        try:
-            with Path(config_path).expanduser().open(encoding="utf8") as config_file:
-                config = json.load(config_file)
-        except FileNotFoundError:
-            config = self.CONFIG_PARAMS
+    def __init__(self, url, initialize=False, config=CONFIG_PATH):
+        if not isinstance(config, dict):
+            try:
+                with Path(config).expanduser().open(encoding="utf8") as config_file:
+                    config = json.load(config_file)
+            except FileNotFoundError:
+                config = self.CONFIG_PARAMS
         verify = None
         if 'remote_server' in config:
             if 'url' in config['remote_server']:

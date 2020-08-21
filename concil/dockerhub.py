@@ -5,22 +5,42 @@ import base64
 import getpass
 from jwcrypto.common import base64url_decode, base64url_encode
 
+class DockerSplitResult(urllib.parse.SplitResult):
+    __slots__ = ()
+
+    @property
+    def repository(self):
+        repository, _, tag = self.path.partition(":")
+        return repository[1:] # strip /
+
+    @property
+    def tag(self):
+        repository, _, tag = self.path.partition(":")
+        return tag or "latest"
+    
+    @property
+    def url(self):
+        if self.scheme not in ('https', 'http', 'docker', 'store'):
+            raise ValueError("url must be a docker://-Url")
+        scheme = self.scheme if self.scheme == 'http' else 'https'
+        if self.port:
+            netloc = f"{self.hostname}:{self.port}"
+        else:
+            netloc = self.hostname
+        return urllib.parse.urlunsplit((scheme, netloc, 'v2/' + self.repository, '', ''))    
+
+
+def parse_docker_url(docker_url):
+    return DockerSplitResult(*urllib.parse.urlsplit(docker_url))
+
 class DockerHub(object):
     def __init__(self, docker_url, verify=None):
-        docker_url = urllib.parse.urlsplit(docker_url)
-        if docker_url.scheme not in ('https', 'http', 'docker', 'store'):
-            raise ValueError("url must be a docker://-Url")
-        self.username = docker_url.username
-        self.password = docker_url.password
-        repository, _, tag = docker_url.path.partition(":")
-        if docker_url.port:
-            netloc = f"{docker_url.hostname}:{docker_url.port}"
-        else:
-            netloc = docker_url.hostname
-        scheme = docker_url.scheme if docker_url.scheme == 'http' else 'https'
-        self.repository = repository[1:] # strip /
-        self.url = urllib.parse.urlunsplit((scheme, netloc, 'v2' + repository,'',''))
-        self.tag = tag or "latest"
+        parts = parse_docker_url(docker_url)
+        self.username = parts.username
+        self.password = parts.password        
+        self.repository = parts.repository
+        self.url = parts.url
+        self.tag = parts.tag
         self.session = requests.Session()
         self.session.proxies = {"https": ""}
         self.session.verify = verify
@@ -79,8 +99,8 @@ class DockerHub(object):
     def open_blob(self, digest):
         return self.request("GET", self.url + "/blobs/" + digest, stream=True)
 
-    def get_manifest(self):
-        response = self.request("GET", self.url + "/manifests/" + self.tag,
-            headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json"})
+    def get_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
+        headers = {"Accept": accept} if accept else {}
+        tag = self.tag if not hash else hash
+        response = self.request("GET", self.url + "/manifests/" + tag, headers=headers)
         return response.content
-
