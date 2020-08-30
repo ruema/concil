@@ -97,10 +97,17 @@ class DockerHub(object):
         )
 
     def open_blob(self, digest):
-        return self.request("GET", self.url + "/blobs/" + digest, stream=True)
+        response = self.request("GET", self.url + "/blobs/" + digest, stream=True)
+        response.raise_for_status()
+        return response
 
-    def get_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
+    def open_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
         headers = {"Accept": accept} if accept else {}
         tag = self.tag if not hash else hash
-        response = self.request("GET", self.url + "/manifests/" + tag, headers=headers)
+        response = self.request("GET", self.url + "/manifests/" + tag, headers=headers, stream=True)
+        response.raise_for_status()
+        return response
+
+    def get_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
+        response = self.open_manifest(hash, accept)
         return response.content

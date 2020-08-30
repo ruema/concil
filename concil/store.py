@@ -7,8 +7,13 @@ import json
 import hashlib
 import time
 import logging
+import subprocess
+import gzip
+import shutil
 from jwcrypto.common import base64url_decode, base64url_encode
 logger = logging.getLogger(__name__)
+
+TAR2SQFS = "tar2sqfs"
 
 def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=None):
     auth = ""
@@ -27,6 +32,29 @@ def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=
         else:
             url += f'/{path}'
     return url
+
+
+def _convert_tar_to_squash(filename, stream):
+    sq_filename = filename.with_suffix('.sq')
+    process = subprocess.Popen([TAR2SQFS, "-fq", str(sq_filename)], stdin=subprocess.PIPE)
+    shutil.copyfileobj(stream, process.stdin)
+    process.stdin.close()
+    if process.wait():
+        raise RuntimeError()
+    sq_filename.rename(filename)
+
+def convert_tar_gzip(filename):
+    with gzip.open(filename, mode="rb") as stream:
+        _convert_tar_to_squash(filename, stream)
+
+def convert_tar(filename):
+    with filename.open("rb") as stram:
+        _convert_tar_to_squash(filename, stream)
+
+IMAGE_CONVERTERS = {
+    'application/vnd.docker.image.rootfs.diff.tar': convert_tar,
+    'application/vnd.docker.image.rootfs.diff.tar.gzip': convert_tar_gzip,
+}
 
 class Store:
     CONFIG_PATH = "~/.concil/config.json"
@@ -92,7 +120,7 @@ class Store:
 
     def store_cache(self, type, bytes, digest=None):
         if digest is None:
-            digest = hashlib.sha256(manifest).hexdigest()
+            digest = hashlib.sha256(bytes).hexdigest()
         path = self._cache_dir / type
         path.mkdir(parents=True, exist_ok=True)
         logging.debug("storing %s/%s (%s bytes)", path, digest, len(bytes))
@@ -127,34 +155,58 @@ class Store:
                     break
             else:
                 raise ValueError("no matching platform found")
-            try:
-                manifest = self.get_cache("manifest", entry['digest'])
-            except FileNotFoundError:
-                manifest = self._hub.get_manifest(hash=entry['digest'], accept=None)
-                if 'size' in entry and entry['size'] != len(manifest):
-                    raise ValueError("hash check failed")
-                digest = hashlib.sha256(manifest).hexdigest()
-                if f"sha256:{digest}" != entry['digest']:
-                    raise ValueError("hash check failed")
-                self.store_cache("manifest", manifest, entry['digest'])
-            manifest = json.loads(manifest)
+            filename = self._get_blob("manifest", entry)
+            with filename.open("rb") as input:
+                manifest = json.load(input)
         return manifest
 
     def _get_blob(self, type, entry):
+        filename = self._cache_dir / type / entry['digest']
+        logging.debug("trying cache %s", filename)
+        if filename.is_file():
+            filename.touch()
+            return filename
+        filename.parent.mkdir(parents=True, exist_ok=True)
+        output_filename = filename.with_suffix('.out')
         try:
-            blob = self.get_cache(type, entry['digest'])
-        except FileNotFoundError:
-            blob = self._hub.open_blob(entry['digest']).content
-            if 'size' in entry and entry['size'] != len(blob):
+            with output_filename.open('xb') as output:
+                if type == "manifest":
+                    response = self._hub.open_manifest(hash=entry['digest'], accept=None)
+                else:
+                    response = self._hub.open_blob(entry['digest'])
+                digest = hashlib.sha256()
+                size = 0
+                with response:
+                    for chunk in response.iter_content(102400):
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        size += len(chunk)
+                        digest.update(chunk)
+            if 'size' in entry and entry['size'] != size:
                 raise ValueError("hash check failed")
-            digest = hashlib.sha256(blob).hexdigest()
+            digest = digest.hexdigest()
             if f"sha256:{digest}" != entry['digest']:
                 raise ValueError("hash check failed")
-            self.store_cache(type, blob, entry['digest'])
-        return blob
+            convert = IMAGE_CONVERTERS.get(entry['mediaType'])
+            if convert is not None:
+                convert(output_filename)
+            output_filename.rename(filename)
+        except FileExistsError:
+            # some other process is downloading the same file
+            while output_filename.is_file():
+                time.sleep(1)
+            if not filename.is_file():
+                # something went wrong
+                raise ValueError("downloading failed")
+        finally:
+            output_filename.unlink(missing_ok=True)
+        return filename
 
     def get_config(self, entry):
-        return json.loads(self._get_blob("config", entry))
+        filename = self._get_blob("config", entry)
+        with filename.open('rb') as input:
+            return json.load(input)
 
     def get_layer(self, entry):
         return self._get_blob("layers", entry)
