@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import sys
 import os
 from concil.dockerhub import parse_docker_url
