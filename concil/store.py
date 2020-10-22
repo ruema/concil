@@ -33,23 +33,29 @@ def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=
             url += f'/{path}'
     return url
 
-
 def _convert_tar_to_squash(filename, stream):
+    digest = hashlib.sha256()
     sq_filename = filename.with_suffix('.sq')
     process = subprocess.Popen([TAR2SQFS, "-fq", str(sq_filename)], stdin=subprocess.PIPE)
-    shutil.copyfileobj(stream, process.stdin)
+    while True:
+        buf = stream.read(16*1024)
+        if not buf:
+            break
+        digest.update(buf)
+        process.stdin.write(buf)
     process.stdin.close()
     if process.wait():
         raise RuntimeError()
     sq_filename.rename(filename)
+    return digest.hexdigest()
 
 def convert_tar_gzip(filename):
     with gzip.open(filename, mode="rb") as stream:
-        _convert_tar_to_squash(filename, stream)
+        return _convert_tar_to_squash(filename, stream)
 
 def convert_tar(filename):
     with filename.open("rb") as stram:
-        _convert_tar_to_squash(filename, stream)
+        return _convert_tar_to_squash(filename, stream)
 
 IMAGE_CONVERTERS = {
     'application/vnd.docker.image.rootfs.diff.tar': convert_tar,
@@ -79,6 +85,8 @@ class Store:
                 config = json.load(config_file)
         except FileNotFoundError:
             config = self.CONFIG_PARAMS
+        if verify is None:
+            verify = Path(config['cafile']).expanduser()
         disable_content_trust = config.get("disable_content_trust", False)
         registry_url = notary_url = None
         self._cache_dir = Path(config['cache_dir']).expanduser()
@@ -98,7 +106,7 @@ class Store:
             self.target = None
         else:
             if notary_url is None:
-                notary_url = parse_docker_url(registry_url)
+                notary_url = registry_url
                 port = 4443
             else:
                 notary_url = parse_docker_url(notary_url)
@@ -136,7 +144,7 @@ class Store:
 
     def get_manifest(self, architecture=None, operating_system=None):
         if not self.target:
-            manifest = self._hub.get_manifest()
+            manifest = self._hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
         else:
             hex_hash = base64.b16encode(base64url_decode(self.target['hashes']['sha256'])).decode('ascii').lower()
             hex_digest = f"sha256:{hex_hash}"
@@ -165,6 +173,8 @@ class Store:
         logging.debug("trying cache %s", filename)
         if filename.is_file():
             filename.touch()
+            filename = filename.resolve()
+            filename.touch()
             return filename
         filename.parent.mkdir(parents=True, exist_ok=True)
         output_filename = filename.with_suffix('.out')
@@ -190,8 +200,16 @@ class Store:
                 raise ValueError("hash check failed")
             convert = IMAGE_CONVERTERS.get(entry['mediaType'])
             if convert is not None:
-                convert(output_filename)
-            output_filename.rename(filename)
+                diff_digest = convert(output_filename)
+                diff_filename = self._cache_dir / type / f"sha256:{diff_digest}"
+            else:
+                diff_filename = filename
+            output_filename.rename(diff_filename)
+            if diff_filename != filename:
+                try:
+                    filename.symlink_to(diff_filename.name)
+                except FileExistsError:
+                    pass
         except FileExistsError:
             # some other process is downloading the same file
             while output_filename.is_file():
@@ -200,8 +218,11 @@ class Store:
                 # something went wrong
                 raise ValueError("downloading failed")
         finally:
-            output_filename.unlink(missing_ok=True)
-        return filename
+            try:
+                output_filename.unlink() # TODO: Python3.8 missing_ok=True
+            except FileNotFoundError:
+                pass
+        return filename.resolve()
 
     def get_config(self, entry):
         filename = self._get_blob("config", entry)
