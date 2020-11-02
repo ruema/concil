@@ -97,8 +97,9 @@ def mount_dir(mount_point, source, target, type, options):
 
 def sq_mount(layers, mount_path):
     """mount a squash image"""
-    args = (ctypes.c_char_p * 4)(b'squashfuse', b'-f', ('|'.join(layers)).encode(), mount_path.encode())
-    threading.Thread(target=libsquash.squash_main, args=(4, args), daemon=True).start()
+    args = [b'squashfuse', b'-f'] + [l.encode() for l in layers] + [mount_path.encode()]
+    args = (ctypes.c_char_p * len(args))(*args)
+    threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
     while not os.path.exists(os.path.join(mount_path, 'bin')):
         time.sleep(0.01)
 

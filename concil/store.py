@@ -33,6 +33,14 @@ def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=
             url += f'/{path}'
     return url
 
+def copyfileobj(fsrc, fdst, length=16*1024):
+    """copy data from file-like object fsrc to file-like object fdst"""
+    while 1:
+        buf = fsrc.read(length)
+        if not buf:
+            break
+        fdst.write(buf)
+
 def _convert_tar_to_squash(filename, stream):
     digest = hashlib.sha256()
     sq_filename = filename.with_suffix('.sq')
@@ -114,7 +122,7 @@ class Store:
             path = f"{url.hostname}/{url.repository}"
             full_url = unsplit_url(notary_url.scheme, notary_url.hostname, port, path, url.username, url.password)
             logger.debug("full notary url: %s", full_url)
-            notary = Notary(full_url, config={"trust_dir" : self._cache_dir / "notary"})
+            notary = Notary(full_url, config={"trust_dir" : self._cache_dir / "notary"}, verify=verify)
             targets = notary.targets.data['signed']['targets']
             self.target = targets[url.tag]
             logger.debug("notary target for %s: %r", url.tag, self.target)

@@ -246,10 +246,20 @@ def check_hashes(bytes, hashes):
                 return False
     return hash_found
 
+def generate_hashes(bytes):
+    result = { "hashes":{}, "length": len(bytes) }
+    for hash_name, hash_function in HASH_ALGORITHMS.items():
+        result['hashes'][hash_name] = base64.encodebytes(hash_function(bytes).digest()).decode().strip()
+    return result
+
+
 class Metafile(object):
-    def __init__(self, bytes):
-        self.bytes = bytes
-        self.data = json.loads(bytes)
+    INITIAL_BYTES = b"{}"
+
+    def __init__(self, bytes=None):
+        self.dirty = not bytes
+        self.bytes = bytes or self.INITIAL_BYTES
+        self.data = json.loads(self.bytes)
 
     def version(self):
         return self.data['signed']['version']
@@ -259,6 +269,9 @@ class Metafile(object):
 
     def hash(self):
         return hashlib.sha256(self.bytes).hexdigest()
+
+    def hashes(self):
+        return generate_hashes(self.bytes)
 
     def check_hashes(self, hashes):
         return check_hashes(self.bytes, hashes)
@@ -279,6 +292,11 @@ class Metafile(object):
             method = signature['method']
             SIGNATURE_METHODS[method](key, signed, sig)
 
+    def to_bytes(self, private_keys):
+        self.data['signed']['expires'] = (datetime.datetime.utcnow() + datetime.timedelta(seconds=self.EXPIRATION_DELAY)).isoformat() + 'Z'
+        self.data['signed']['version'] = self.data['signed'].get('version', 0) + 1
+        self.bytes = encode_signed_json(private_keys, self.data['signed'])
+        return self.bytes
 
 class Timestamp(Metafile):
     name = "timestamp"
@@ -288,16 +306,30 @@ class Timestamp(Metafile):
 
 class Snapshot(Metafile):
     name = "snapshot"
+    EXPIRATION_DELAY = 3 * 365 * 24 * 3600 #seconds
+    INITIAL_BYTES = b'{"signed":{"_type":"Snapshot","meta":{}}}'
 
-    def __getitem__(self, value):
-        return self.data['signed']['meta'][value]
+    def __getitem__(self, key):
+        return self.data['signed']['meta'][key]
+    
+    def __setitem__(self, key, value):
+        self.data['signed']['meta'][key] = value.hashes()
+    
+    def update(self, value):
+        self.data['signed']['meta'][value.name] = value.hashes()
+        self.dirty = True
+       
 
 class Root(Metafile):
     name = "root"
+    EXPIRATION_DELAY = 10 * 365 * 24 * 3600 #seconds
+    INITIAL_BYTES = b'{"signed":{"_type":"Root","consistent_snapshot":false,"keys":{},"roles":{}}}'
 
     def get_keys(self, role):
         roles = self.data['signed']['roles']
         keys = self.data['signed']['keys']
+        if role not in roles:
+            return {}
         keyids = roles[role]['keyids']
         return {k: keys[k] for k in keyids}
 
@@ -325,9 +357,26 @@ class Root(Metafile):
                 raise NotImplementedError()
         if trust_pinning.get("disable_tofu", False):
             raise RuntimeError("tofu disabled")
+    
+    def add_key(self, key_id, key_dict, role):
+        if key_id is None:
+            key_id = hashlib.sha256(encode_json(key_dict)).hexdigest()
+        roles = self.data['signed']['roles']
+        keys = self.data['signed']['keys']
+        if role not in roles:
+            roles[role] = {
+                'threshold': 1,
+                'keyids': []
+            }
+        roles[role]['keyids'].append(key_id)
+        keys[key_id] = key_dict
+        self.dirty = True
+
 
 class Targets(Metafile):
     name = "targets"
+    EXPIRATION_DELAY = 3 * 365 * 24 * 3600 #seconds
+    INITIAL_BYTES = b'{"signed":{"_type":"Targets","delegations":{"keys":{},"roles":{}},"targets":{}}}'
 
     def get_keys(self, role):
         roles = self.data['signed']['delegations']['roles']
@@ -337,6 +386,11 @@ class Targets(Metafile):
 
     def __getitem__(self, target):
         return self.data['signed']['targets'][target]
+
+    def add_target(self, target, filename):
+        bytes = Path(filename).read_bytes()
+        self.data['signed']['targets'][target] = generate_hashes(bytes)
+        self.dirty = True
 
 
 class JsonStore(object):
@@ -388,6 +442,21 @@ class JsonStore(object):
         filename.parent.mkdir(exist_ok=True, parents=True)
         filename.write_bytes(bytes)
         return metafile
+    
+    def get_timestamp_key(self):
+        url = f"{self._hub.url}/_trust/tuf/timestamp.key"
+        return self._hub.request('GET', url).json()
+    
+    def get_snapshot_key(self):
+        url = f"{self._hub.url}/_trust/tuf/snapshot.key"
+        return self._hub.request('GET', url).json()
+    
+    def publish(self, datas):
+        upload_files = {}
+        for data in datas:
+            upload_files[data.name] = (data.name, data.bytes, 'application/octet-stream')
+        url = f"{self._hub.url}/_trust/tuf/"
+        return self._hub.request('POST', url, files=upload_files)
 
 
 def update_targets(delegate_targets, store, snapshot, targets):
@@ -412,24 +481,28 @@ class Notary(object):
         },
     }
 
-    def __init__(self, url, initialize=False, config=CONFIG_PATH):
+    def __init__(self, url, initialize=False, config=CONFIG_PATH, verify=None):
         if not isinstance(config, dict):
             try:
                 with Path(config).expanduser().open(encoding="utf8") as config_file:
                     config = json.load(config_file)
             except FileNotFoundError:
                 config = self.CONFIG_PARAMS
-        verify = None
         if 'remote_server' in config:
             if 'url' in config['remote_server']:
                 url = urllib.parse.urljoin(config['remote_server']['url'], url)
             if 'root_ca' in config['remote_server']:
                 verify = config['remote_server']['root_ca']
         self._trust_dir = Path(config['trust_dir']).expanduser()
+        self.repository = url
         self._json_store = JsonStore(self._trust_dir / 'tuf', url, config, verify=verify)
         self._private_key_store = PrivateKeyStore(self._trust_dir / 'private')
+        delegate_targets = {}
         if initialize:
-            pass
+            snapshot = Snapshot()
+            root = Root()
+            targets = Targets()
+            delegate_targets = {}
         else:
             store = self._json_store
             timestamp = store.get(Timestamp)
@@ -440,8 +513,58 @@ class Notary(object):
             snapshot.verify_sign(root)
             root.verify_sign(root)
             targets.verify_sign(root)
-            delegate_targets = {}
             update_targets(delegate_targets, store, snapshot, targets)
-            self.root = root
-            self.targets = targets
-            self.delegate_targets = delegate_targets
+        self.snapshot = snapshot
+        self.root = root
+        self.targets = targets
+        self.delegate_targets = delegate_targets
+
+    def add_target(self, target, filename, role=None):
+        targets = self.targets if role is None else self.delegate_targets[role]
+        targets.add_target(target, filename)
+
+    def _get_keys(self, role):
+        key_ids = self.root.get_keys(role)
+        if key_ids:
+            keys = {
+                key_id: self._private_key_store.get(key_id, role)
+                for key_id in key_ids
+            }
+        else:
+            # generate new key
+            key, key_dict, key_id = self._private_key_store.generate_key(role, self.repository)
+            self.root.add_key(key_id, key_dict, role)
+            keys = {key_id: key}
+        return keys
+
+    def publish(self):
+        # TODO: delgate targets
+        updates = []
+        if self.targets.dirty:
+            target_keys = self._get_keys("targets")
+            try:
+                snapshot_keys = self._get_keys("snapshot")
+            except KeyError:
+                logger.debug("Client does not have the key to sign snapshot. "
+                    "Assuming that server should sign the snapshot.")
+                snapshot_keys = None
+            self.targets.to_bytes(target_keys)
+            self.snapshot.update(self.targets)
+            updates.append(self.targets)
+        if self.root.dirty:
+            root_keys = self.root.get_keys('root')
+            if root_keys:
+                root_key = self._private_key_store.get(list(root_keys)[0], "Root")
+            else:
+                root_key = self._private_key_store.get_root()
+                self.root.add_root_key(root_key)
+            self.root.to_bytes([root_key])
+            self.snapshot.update(self.root)
+            if snapshot_keys is None:
+                self.root.add_key(None, self._json_store.get_snapshot_key())
+            self.root.add_key(None, self._json_store.get_timestamp_key())
+            updates.append(self.root)
+        if self.snapshot.dirty and snapshot_keys is not None:
+            self.snapshot.to_bytes(snapshot_keys)
+            updates.append(self.snapshot)
+        self._json_store.publish(updates)
