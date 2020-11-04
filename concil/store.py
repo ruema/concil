@@ -1,19 +1,19 @@
-from pathlib import Path
-import urllib.parse
-from .dockerhub import DockerHub, parse_docker_url
-from .notary import Notary, check_hashes
 import base64
 import json
 import hashlib
 import time
 import logging
 import subprocess
-import gzip
 import shutil
+import urllib.parse
+from pathlib import Path
+from gzip import GzipFile
 from jwcrypto.common import base64url_decode, base64url_encode
+from .dockerhub import DockerHub, parse_docker_url
+from .notary import Notary, check_hashes
 logger = logging.getLogger(__name__)
 
-TAR2SQFS = "tar2sqfs"
+TAR2SQFS = ["tar2sqfs"]
 
 def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=None):
     auth = ""
@@ -35,16 +35,15 @@ def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=
 
 def copyfileobj(fsrc, fdst, length=16*1024):
     """copy data from file-like object fsrc to file-like object fdst"""
-    while 1:
+    while True:
         buf = fsrc.read(length)
         if not buf:
             break
         fdst.write(buf)
 
-def _convert_tar_to_squash(filename, stream):
+def _convert_tar_to_squash(stream, output_filename):
     digest = hashlib.sha256()
-    sq_filename = filename.with_suffix('.sq')
-    process = subprocess.Popen([TAR2SQFS, "-fq", str(sq_filename)], stdin=subprocess.PIPE)
+    process = subprocess.Popen(TAR2SQFS + ["-fq", str(output_filename)], stdin=subprocess.PIPE)
     while True:
         buf = stream.read(16*1024)
         if not buf:
@@ -54,20 +53,22 @@ def _convert_tar_to_squash(filename, stream):
     process.stdin.close()
     if process.wait():
         raise RuntimeError()
-    sq_filename.rename(filename)
     return digest.hexdigest()
 
-def convert_tar_gzip(filename):
-    with gzip.open(filename, mode="rb") as stream:
-        return _convert_tar_to_squash(filename, stream)
+def convert_tar_gzip(stream, output_filename):
+    stream = GzipFile(fileobj=stream, mode="rb")
+    return _convert_tar_to_squash(stream, output_filename)
 
-def convert_tar(filename):
-    with filename.open("rb") as stram:
-        return _convert_tar_to_squash(filename, stream)
+def convert_tar(stream, output_filename):
+    return _convert_tar_to_squash(stream, output_filename)
 
 IMAGE_CONVERTERS = {
     'application/vnd.docker.image.rootfs.diff.tar': convert_tar,
     'application/vnd.docker.image.rootfs.diff.tar.gzip': convert_tar_gzip,
+    "application/vnd.oci.image.layer.v1.tar": convert_tar,
+    "application/vnd.oci.image.layer.v1.tar+gzip": convert_tar_gzip,
+    "tar": convert_tar,
+    "tar+gzip": convert_tar_gzip,
 }
 
 class Store:
@@ -208,7 +209,10 @@ class Store:
                 raise ValueError("hash check failed")
             convert = IMAGE_CONVERTERS.get(entry['mediaType'])
             if convert is not None:
-                diff_digest = convert(output_filename)
+                sq_filename = filename.with_suffix('.sq')
+                with output_filename.open("rb") as stream:
+                    diff_digest = convert(stream, sq_filename)
+                sq_filename.rename(output_filename)
                 diff_filename = self._cache_dir / type / f"sha256:{diff_digest}"
             else:
                 diff_filename = filename

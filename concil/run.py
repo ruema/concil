@@ -80,7 +80,7 @@ def clone(re=False):
 def unmount(mount_path):
     """ unmount the mount path"""
     if libc.umount2(mount_path.encode(), 2):  # MNT_FORCE = 1 MNT_DETACH = 2
-        logging.error("unmount failed: %s", ctypes.get_errno())
+        logger.error("unmount failed: %s", ctypes.get_errno())
 
 def get_mount_point():
     runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -97,7 +97,7 @@ def mount_dir(mount_point, source, target, type, options):
 
 def sq_mount(layers, mount_path):
     """mount a squash image"""
-    args = [b'squashfuse', b'-f'] + [l.encode() for l in layers] + [mount_path.encode()]
+    args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_path.encode()]
     args = (ctypes.c_char_p * len(args))(*args)
     threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
     while not os.path.exists(os.path.join(mount_path, 'bin')):
@@ -115,8 +115,12 @@ def mount_std_volumes(mount_point):
     mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0);
 
 class Config:
-    def __init__(self, config_filename):
-        self.basepath = os.path.dirname(config_filename)
+    def __init__(self, manifest_filename, private_key=None):
+        self.basepath = os.path.dirname(manifest_filename)
+        self.private_key = private_key
+        with open(manifest_filename, 'r', encoding='utf8') as file:
+            self.manifest = json.load(file)
+        config_filename = os.path.join(self.basepath, self.manifest['config']['digest'].split(':',1)[1])
         with open(config_filename, 'r', encoding='utf8') as file:
             self.image_config = json.load(file)
         self.config = self.image_config.get('config', {})
@@ -126,7 +130,7 @@ class Config:
         environment = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith('LD_')
+            if not key.startswith('LD_') and not key.startswith('CONCIL_')
         }
         environment.update(e.split('=', 1) for e in self.config.get('Env', []))
         return environment
@@ -144,9 +148,46 @@ class Config:
             commandline.extend(args)
         return commandline
 
+    def get_key(self, layer):
+        if self.private_key is None:
+            self.private_key = os.environ.get('CONCIL_ENCRYPTION_KEY')
+            if self.private_key is None:
+                raise RuntimeError("no private key given")
+        import getpass
+        from jwcrypto import jwk, jwe
+        from jwcrypto.common import base64url_decode, base64url_encode
+        if isinstance(self.private_key, str):
+            with open(self.private_key, 'rb') as file:
+                data = file.read()
+            try:
+                self.private_key = jwk.JWK.from_pem(data)
+            except TypeError:
+                passwd = os.environ.get('CONCIL_ENCRYPTION_PASSWORD')
+                if not passwd:
+                    passwd = getpass.getpass("password for encryption key: ")
+                self.private_key = jwk.JWK.from_pem(data, passwd.encode())
+        enc = base64url_decode(layer["annotations"]["org.opencontainers.image.enc.keys.jwe"])
+        pub_data = json.loads(base64url_decode(layer["annotations"]["org.opencontainers.image.enc.pubopts"]))
+        if pub_data["cipher"] != "AES_256_CTR_HMAC_SHA256":
+            raise ValueError("unsupported cipher")
+        jwetoken = jwe.JWE()
+        jwetoken.deserialize(enc, key=self.private_key)
+        payload = json.loads(jwetoken.payload)
+        return "AES_256_CTR,{},{}".format(payload['symkey'], payload["cipheroptions"]['nonce'])
+
     def get_layers(self):
-        return [
-            os.path.join(self.basepath, '..', 'layers', l)
+        layers = {}
+        for layer in self.manifest["layers"]:
+            digest = layer["digest"]
+            filename = os.path.join(self.basepath, digest.split(':', 1)[1])
+            if layer["mediaType"] == "application/vnd.docker.image.rootfs.diff.squashfs+encrypted":
+                filename += ',' + self.get_key(layer)
+            elif layer["mediaType"] == "application/vnd.docker.image.rootfs.diff.squashfs":
+                pass
+            else:
+                raise RuntimeError(f"unsupported media type {layer['mediaType']}")
+            layers[digest] = filename
+        return [layers[l]
             for l in self.image_config['rootfs']['diff_ids']
         ]
 
@@ -187,9 +228,9 @@ def run_child(config, args=None, volumes=None):
     os.rmdir(mount_point)
 
 def run(config, args=None, volumes=None):
-    if config.image_config["architecture"] != PLATFORMS[platform.machine()]:
+    if "architecture" in config.image_config and config.image_config["architecture"] != PLATFORMS[platform.machine()]:
         raise RuntimeError("unsupported architecture")
-    if config.image_config["os"] != platform.system().lower():
+    if "os" in config.image_config and config.image_config["os"] != platform.system().lower():
         raise RuntimeError("unsupported os")
     pid = clone()
     if pid == 0:
@@ -200,17 +241,22 @@ def run(config, args=None, volumes=None):
     
 def main():
     if len(sys.argv) <= 1:
-        print("Usage: run.py [config.json] [-v volume] args")
+        print("Usage: run.py [config.json] [-p private_key.pem] [-v volume] args")
         return
     config_filename = sys.argv[1]
-    config = Config(config_filename)
     volumes = []
     args = sys.argv[2:]
+    if args and args[0] == '-p':
+        private_key = args[1]
+        args = args[2:]
+    else:
+        private_key = None
     while args and args[0] == '-v':
         volumes.append(args[1])
         args = args[2:]
     if args and args[0] == '--':
         args = args[1:]
+    config = Config(config_filename, private_key)
     run(config, args, volumes)
 
 if __name__ == '__main__':

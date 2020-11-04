@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from jwcrypto import jwk, jwe
+from jwcrypto.common import base64url_decode, base64url_encode
+from .store import IMAGE_CONVERTERS
 
 class FormatError(Exception):
     pass
@@ -31,37 +33,88 @@ def calculate_digest(filename):
     digest = hash.hexdigest()
     return f"sha256:{digest}"
 
-def convert_tar_to_squash(path, input):
-    tmpdir = tempfile.mkdtemp(dir=path)
-    output_filename = tmpdir + '.sq'
-    process = subprocess.Popen(["tar", "-x"], stdin=subprocess.PIPE, cwd=tmpdir)
+def calculate_gziped_digest(filename):
     hash = sha256()
-    while True:
-        data = input.read(1024*1024)
-        if not data:
-            break
-        process.stdin.write(data)
-        hash.update(data)
-    process.stdin.close()
-    process.wait()
-    unpacked_digest = hash.hexdigest()
-    subprocess.run(["mksquashfs", tmpdir, output_filename, "-all-root", "-no-progress"])
-    shutil.rmtree(tmpdir)
-    return Path(output_filename), f"sha256:{unpacked_digest}"
+    with gzip.open(filename, 'rb') as input:
+        while True:
+            data = input.read(1024*1024)
+            if not data:
+                break
+            hash.update(data)
+    digest = hash.hexdigest()
+    return f"sha256:{digest}"
 
+
+DEFAULT_ALGS = {
+    "EC": "ECDH-ES+A256KW",
+    "RSA": "RSA-OAEP",
+}
+
+def encrypt(input_stream, encrypted_filename):
+    backend = default_backend()
+    symkey = os.urandom(32)
+    nonce = os.urandom(16)
+    cipher = Cipher(algorithms.AES(symkey), modes.CTR(nonce), backend=backend)
+    encryptor = cipher.encryptor()
+    hmac_hash = hmac.HMAC(symkey, hashes.SHA256(), backend=default_backend())
+    sha_hash_encrypted = sha256()
+    sha_hash_unencrypted = sha256()
+    with input_stream, encrypted_filename.open('wb') as output:
+        while True:
+            data = input_stream.read(1024*1024)
+            if not data:
+                break
+            sha_hash_unencrypted.update(data)
+            data = encryptor.update(data)
+            sha_hash_encrypted.update(data)
+            hmac_hash.update(data)
+            output.write(data)
+        data = encryptor.finalize()
+        sha_hash_encrypted.update(data)
+        hmac_hash.update(data)
+        output.write(data)
+    hmac_hash = hmac_hash.finalize()
+    sha_hash_encrypted = sha_hash_encrypted.hexdigest()
+    sha_hash_unencrypted = sha_hash_unencrypted.hexdigest()
+    pub_data = {
+        "cipher": "AES_256_CTR_HMAC_SHA256",
+        "hmac": encode_base64(hmac_hash),
+        "cipheroptions": {}
+    }
+    payload = {
+        "symkey": encode_base64(symkey),
+        "digest": f"sha256:{sha_hash_unencrypted}",
+        "cipheroptions": {"nonce": encode_base64(nonce)}
+    }
+    return pub_data, payload, sha_hash_encrypted
 
 class Descriptor:
     def __init__(self, filename, media_type, digest, size, annotations=None):
         self.filename = filename
         self.media_type = media_type
+        if digest is None:
+            digest = calculate_digest(filename)
         self.digest = digest
-        self.unpacked_digest = None
-        self.previous_digest = None
+        self._unpacked_digest = None
         self.data = None
         self.size = size
-        self.annotations = annotations
+        self.annotations = annotations if annotations is not None else {}
         self.converted_media_type = None
         self.encryption_keys = []
+        self.status = 'keep'
+
+    @property
+    def unpacked_digest(self):
+        if self._unpacked_digest is None:
+            if self.media_type == 'squashfs':
+                self._unpacked_digest = self.digest
+            elif self.media_type == 'tar':
+                self._unpacked_digest = self.digest
+            elif self.media_type == 'tar+gzip':
+                self._unpacked_digest = calculate_gziped_digest(self.filename)
+            else:
+                raise RuntimeError()
+        return self._unpacked_digest
 
     def convert(self, media_type):
         if self.media_type != media_type:
@@ -75,97 +128,67 @@ class Descriptor:
         if media_type in ("tar+gzip", "tar+zstd"):
             raise NotImplemented()
         else:
-            result.unpacked_digest = digest
+            result._unpacked_digest = digest
         result.data = data
         return result
 
     def export(self, path):
+        temporary_file = None
         if self.data:
             input_stream = io.BytesIO(self.data)
         else:
             input_stream = self.filename.open('rb')
         if self.converted_media_type is None:
-            pass
+            if not self.encryption_keys:
+                output_filename = path / self.digest.split(':', 1)[1]
+                with input_stream, output_filename.open('wb') as output:
+                    shutil.copyfileobj(input_stream, output)
+                return type(self)(output_filename, self.media_type, self.digest, self.size, self.annotations)
+            media_type = self.media_type
         elif self.converted_media_type == "squashfs":
-            if self.media_type in ('tar', 'tar+gzip'):
-                open_ = gzip.open if self.media_type == 'tar+gzip' else lambda f:f
-                with open_(self.filename.open('rb')) as input:
-                    squash_filename, previous_digest = convert_tar_to_squash(path, input)
-                if not self.encryption_keys:
-                    digest = calculate_digest(squash_filename)
-                    output_filename = squash_filename.with_name(digest.split(':',1)[1])
-                    squash_filename.rename(output_filename)
-                    result = type(self)(output_filename, self.converted_media_type, digest, output_filename.stat().st_size, self.annotations)
-                    result.unpacked_digest = digest
-                    result.previous_digest = previous_digest
-                    return result
-                else:
-                    input_stream = squash_filename.open('rb')
-            else:
+            print(f"Convert {self.media_type}")
+            convert = IMAGE_CONVERTERS.get(self.media_type)
+            if convert is None:
                 raise NotImplemented()
+            squash_filename = path / f"{self.digest}.sq"
+            diff_digest = convert(input_stream, squash_filename)
+            self._unpacked_digest = f"sha256:{diff_digest}"
+            if not self.encryption_keys:
+                digest = calculate_digest(squash_filename)
+                output_filename = squash_filename.with_name(digest.split(':',1)[1])
+                squash_filename.rename(output_filename)
+                return type(self)(output_filename, self.converted_media_type, digest, output_filename.stat().st_size, self.annotations)
+            else:
+                temporary_file = squash_filename
+                input_stream = squash_filename.open('rb')
+                media_type = "squashfs"
         else:
             raise NotImplemented()
 
-        if self.encryption_keys:
-            backend = default_backend()
-            symkey = os.urandom(32)
-            nonce = os.urandom(16)
-            cipher = Cipher(algorithms.AES(symkey), modes.CTR(nonce), backend=backend)
-            encryptor = cipher.encryptor()
-            hmac_hash = hmac.HMAC(symkey, hashes.SHA256(), backend=default_backend())
-            sha_hash_encrypted = sha256()
-            sha_hash_unencrypted = sha256()
-            encrypted_filename = path / "enc"
-            with input_stream, encrypted_filename.open('wb') as output:
-                while True:
-                    data = input_stream.read(1024*1024)
-                    if not data:
-                        break
-                    sha_hash_unencrypted.update(data)
-                    data = encryptor.update(data)
-                    sha_hash_encrypted.update(data)
-                    hmac_hash.update(data)
-                    output.write(data)
-                data = encryptor.finalize()
-                sha_hash_encrypted.update(data)
-                hmac_hash.update(data)
-                output.write(data)
-            hmac_hash = hmac_hash.finalize()
-            sha_hash_encrypted = sha_hash_encrypted.hexdigest()
-            sha_hash_unencrypted = sha_hash_unencrypted.hexdigest()
-            pub_data = {
-                "cipher": "AES_256_CTR_HMAC_SHA256",
-                "hmac": encode_base64(hmac_hash),
-                "cipheroptions": {}
-            }
-            payload = {
-                "symkey": encode_base64(symkey),
-                "digest": f"sha256:{sha_hash_unencrypted}",
-                "cipheroptions": {"nonce": encode_base64(nonce)}
-            }
-            protected_header = {"alg": "RSA-OAEP", "enc": "A256GCM"}
-            jwetoken = jwe.JWE(json.dumps(payload).encode('utf-8'),
-                protected=protected_header
-            )
-            for key in self.encryption_keys:
-                jwetoken.add_recipient(key)
-            enc = jwetoken.serialize()
-            annotations = dict(self.annotations)
-            annotations["org.opencontainers.image.enc.keys.jwe"] = encode_base64(enc.encode('utf8'))
-            annotations["org.opencontainers.image.enc.pubopts"] = encode_base64(json.dumps(pub_data).encode('utf8'))
-            output_filename = path / sha_hash_encrypted
-            encrypted_filename.rename(output_filename)
-            result = type(self)(output_filename, self.media_type + "+encrypted",
-                f"sha256:{sha_hash_encrypted}", output_filename.stat().st_size,
-                annotations)
-            result.previous_digest = previous_digest
-            result.unpacked_digest = result.digest
-            return result
-        else:
-            output_filename = path / self.digest.split(':', 1)[1]
-            with input_stream, output_filename.open('wb') as output:
-                shutil.copyfileobj(input_stream, output)
-            return type(self)(output_filename, self.media_type, self.digest, self.size, self.annotations)
+        assert self.encryption_keys
+        print(f"Encrypt {media_type}")
+        encrypted_filename = path / "enc"
+        pub_data, payload, sha_hash_encrypted = encrypt(input_stream, encrypted_filename)
+
+        jwetoken = jwe.JWE(json.dumps(payload).encode('utf-8'),
+            protected={"enc": "A256GCM"},
+        )
+        for key in self.encryption_keys:
+            jwetoken.add_recipient(key, header={"alg": DEFAULT_ALGS[key.key_type]})
+        enc = jwetoken.serialize()
+        annotations = dict(self.annotations, **{
+            "org.opencontainers.image.enc.keys.jwe": base64url_encode(enc),
+            "org.opencontainers.image.enc.pubopts": base64url_encode(json.dumps(pub_data)),
+        })
+        output_filename = path / sha_hash_encrypted
+        encrypted_filename.rename(output_filename)
+        if temporary_file is not None:
+            temporary_file.unlink()
+        result = type(self)(output_filename, media_type + "+encrypted",
+            f"sha256:{sha_hash_encrypted}", output_filename.stat().st_size,
+            annotations)
+        result._unpacked_digest = result.digest
+        return result
 
     def read(self):
         if self.data:
@@ -225,7 +248,17 @@ class ImageManifest:
     @classmethod
     def from_path(cls, path):
         path = Path(path)
-        with (path / "manifest.json").open('rb') as manifest:
+        if (path / "index.json").exists():
+            with (path / "index.json").open('rb') as index:
+                index = json.load(index)
+            manifests = index.get('manifests', [])
+            if len(manifests) != 1:
+                raise RuntimeError("unsupported")
+            manifest_file = Path(path, "blobs", *manifests[0]['digest'].split(':'))
+            path = manifest_file.parent
+        else:
+            manifest_file = path / "manifest.json"
+        with manifest_file.open('rb') as manifest:
             manifest = json.load(manifest)
         if manifest.get("schemaVersion") != 2:
             raise FormatError("unkown schema version")
@@ -255,21 +288,27 @@ class ImageManifest:
         path.mkdir()
         if manifest_format is None:
             manifest_format = self.manifest_format
-        layers = [layer.export(path) for layer in self.layers]
-        if any(layer.unpacked_digest for layer in layers):
-            # some layer-digest changed, need new config
-            digests = {
-                layer.previous_digest: layer.unpacked_digest
-                for layer in layers
-            }
-            config = json.loads(self.config.read())
-            config['rootfs']['diff_ids'] = [
-                digests.get(digest, digest)
-                for digest in config['rootfs']['diff_ids']
-            ]
-            config = Descriptor.from_data(json.dumps(config).encode('utf8'), "config")
-        else:
-            config = self.config
+        export_layers = []
+        new_diffs = []
+        digests = {}
+        for layer in self.layers:
+            digest = layer.unpacked_digest
+            if layer.status == 'remove':
+                new_digest = None
+            else:
+                exported = layer.export(path)
+                new_digest = exported.unpacked_digest
+                export_layers.append(exported)
+                if layer.status == 'new':
+                    new_diffs.append(new_digest)
+            digests[digest] = new_digest
+        config = json.loads(self.config.read())
+        config['rootfs']['diff_ids'] = [
+            digests[digest]
+            for digest in config['rootfs']['diff_ids']
+            if digests[digest] is not None
+        ] + new_diffs
+        config = Descriptor.from_data(json.dumps(config).encode('utf8'), "config")
         manifest = {
             "schemaVersion":2,
         }
@@ -278,7 +317,7 @@ class ImageManifest:
         manifest['config'] = self._descriptor_to_dict(manifest_format, config.export(path))
         manifest['layers'] = [
             self._descriptor_to_dict(manifest_format, layer)
-            for layer in layers
+            for layer in export_layers
             
         ]
         with (path / "manifest.json").open("w", encoding="utf8") as output:
