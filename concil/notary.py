@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID, SignatureAlgorithmOID
 from cryptography import x509
 from .dockerhub import DockerHub
+from requests
 import logging
 logger = logging.getLogger(__name__)
 
@@ -435,9 +436,8 @@ class Targets(Metafile):
     def __getitem__(self, target):
         return self.data['signed']['targets'][target]
 
-    def add_target(self, target, filename):
-        bytes = Path(filename).read_bytes()
-        self.data['signed']['targets'][target] = generate_hashes(bytes)
+    def add_target_hashes(self, target, hashes):
+        self.data['signed']['targets'][target] = hashes
         self.dirty = True
 
 
@@ -543,33 +543,44 @@ class Notary(object):
                 verify = config['remote_server']['root_ca']
         self._trust_dir = Path(config['trust_dir']).expanduser()
         self.repository = url
-        self._json_store = JsonStore(self._trust_dir / 'tuf', url, config, verify=verify)
+        store = JsonStore(self._trust_dir / 'tuf', url, config, verify=verify)
+        self._json_store = store
         self._private_key_store = PrivateKeyStore(self._trust_dir / 'private')
         delegate_targets = {}
+        if not initialize:
+            try:
+                timestamp = store.get(Timestamp)
+            except requests.HTTPError as error:
+                if error.response.status_code != 404:
+                    raise
+                # not found, initialize empty 
+                initialize = True
+            else:
+                snapshot = store.get(Snapshot, timestamp['snapshot'])
+                root = store.get(Root, snapshot['root'])
+                targets = store.get(Targets, snapshot['targets'])
+                timestamp.verify_sign(root)
+                snapshot.verify_sign(root)
+                root.verify_sign(root)
+                targets.verify_sign(root)
+                update_targets(delegate_targets, store, snapshot, targets)
         if initialize:
             snapshot = Snapshot()
             root = Root()
             targets = Targets()
-            delegate_targets = {}
-        else:
-            store = self._json_store
-            timestamp = store.get(Timestamp)
-            snapshot = store.get(Snapshot, timestamp['snapshot'])
-            root = store.get(Root, snapshot['root'])
-            targets = store.get(Targets, snapshot['targets'])
-            timestamp.verify_sign(root)
-            snapshot.verify_sign(root)
-            root.verify_sign(root)
-            targets.verify_sign(root)
-            update_targets(delegate_targets, store, snapshot, targets)
         self.snapshot = snapshot
         self.root = root
         self.targets = targets
         self.delegate_targets = delegate_targets
 
     def add_target(self, target, filename, role=None):
+        bytes = Path(filename).read_bytes()
+        hashes = generate_hashes(bytes)
+        self.add_target_hash(target, hashes)
+
+    def add_target_hash(self, target, hashes, role=None):
         targets = self.targets if role is None else self.delegate_targets[role]
-        targets.add_target(target, filename)
+        targets.add_target_hash(target, hashes)
 
     def _get_keys(self, role):
         key_ids = self.root.get_keys(role)

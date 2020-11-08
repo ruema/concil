@@ -141,7 +141,7 @@ class Config:
 
     def build_commandline(self, args=None):
         entrypoint = self.config.get('Entrypoint', [])
-        commandline = self.config.get('Cmd', [])
+        commandline = self.config.get('Cmd') or []
         if entrypoint:
             commandline = entrypoint + commandline
         if args:

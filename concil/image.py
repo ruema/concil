@@ -329,6 +329,8 @@ class ImageManifest:
             output.write(self.DIRECTORY_TRANSPORT)
 
     def publish(self, docker_url, manifest_format=None):
+        from .store import Store
+        from notary import generate_hashes
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = {
@@ -342,7 +344,8 @@ class ImageManifest:
             for layer in self.layers
         ]
         
-        hub = DockerHub(docker_url)
+        store = Store(docker_url)
+        hub = store._hub
         for layer in self.layers:
             if hub.has_blob(layer.digest):
                 print(f"Blob {layer.digest} found.")
@@ -362,3 +365,8 @@ class ImageManifest:
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
         print(f"{len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
+        notary = store._notary
+        if notary is not None:
+            hashes = generate_hashes(data)
+            notary.add_target(store.url.tag, hashes)
+            notary.publish()

@@ -86,6 +86,7 @@ class Store:
     }
     def __init__(self, url, config_path=CONFIG_PATH, verify=None):
         url = parse_docker_url(url)
+        self.url = url
         # 'docker://docker.io/library/alpine:latest'
         if url.scheme != "docker":
             raise ValueError("only docker://-url is supported")
@@ -94,7 +95,7 @@ class Store:
                 config = json.load(config_file)
         except FileNotFoundError:
             config = self.CONFIG_PARAMS
-        if verify is None:
+        if verify is None and 'cafile' in config:
             verify = Path(config['cafile']).expanduser()
         disable_content_trust = config.get("disable_content_trust", False)
         registry_url = notary_url = None
@@ -112,7 +113,7 @@ class Store:
         logger.debug("full registry url: %s", full_url)
         self._hub = DockerHub(full_url, verify=verify)
         if disable_content_trust:
-            self.target = None
+            self._notary = None
         else:
             if notary_url is None:
                 notary_url = registry_url
@@ -123,10 +124,7 @@ class Store:
             path = f"{url.hostname}/{url.repository}"
             full_url = unsplit_url(notary_url.scheme, notary_url.hostname, port, path, url.username, url.password)
             logger.debug("full notary url: %s", full_url)
-            notary = Notary(full_url, config={"trust_dir" : self._cache_dir / "notary"}, verify=verify)
-            targets = notary.targets.data['signed']['targets']
-            self.target = targets[url.tag]
-            logger.debug("notary target for %s: %r", url.tag, self.target)
+            self._notary = Notary(full_url, config={"trust_dir" : self._cache_dir / "notary"}, verify=verify)
 
     def cache_cleanup(self):
         cache_time = time.time() - self._cache_timeout
@@ -152,16 +150,19 @@ class Store:
         return bytes
 
     def get_manifest(self, architecture=None, operating_system=None):
-        if not self.target:
+        targets = self._notary.targets.data['signed']['targets']
+        target = targets[self.url.tag]
+        logger.debug("notary target for %s: %r", self.url.tag, target)
+        if not target:
             manifest = self._hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
         else:
-            hex_hash = base64.b16encode(base64url_decode(self.target['hashes']['sha256'])).decode('ascii').lower()
+            hex_hash = base64.b16encode(base64url_decode(target['hashes']['sha256'])).decode('ascii').lower()
             hex_digest = f"sha256:{hex_hash}"
             try:
                 manifest = self.get_cache("manifest", hex_digest)
             except FileNotFoundError:
                 manifest = self._hub.get_manifest(hash=hex_digest, accept=None)
-                if not check_hashes(manifest, self.target):
+                if not check_hashes(manifest, target):
                     raise ValueError("hash check failed")
                 self.store_cache("manifest", manifest, hex_digest)
         manifest = json.loads(manifest)
