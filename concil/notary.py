@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography.hazmat.primitives.serialization import load_der_public_key, load_der_private_key, Encoding, PublicFormat, PrivateFormat, BestAvailableEncryption
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID, SignatureAlgorithmOID
 from cryptography import x509
 from .dockerhub import DockerHub
@@ -51,6 +52,36 @@ def verify_cert(cert, public_key):
     else:
         raise RuntimeError("unknown signature algorithm")
 
+def generate_certificate(private_key, repository):
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, repository),
+    ])
+    return x509.CertificateBuilder().subject_name(
+        subject
+    ).issuer_name(
+        issuer
+    ).public_key(
+        private_key.public_key()
+    ).serial_number(
+        x509.random_serial_number()
+    ).not_valid_before(
+        datetime.datetime.utcnow()
+    ).not_valid_after(
+        # Our certificate will be valid for 10 years
+        datetime.datetime.utcnow() + datetime.timedelta(days=10*365)
+    ).add_extension(
+        x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=True,
+            data_encipherment=False, key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False),
+        critical=True
+    ).add_extension(
+        x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]),
+        critical=False,
+    ).add_extension(
+        x509.BasicConstraints(ca=False, path_length=None),
+        critical=True,
+    # Sign our certificate with our private key
+    ).sign(private_key, hashes.SHA256(), default_backend())
 
 def parse_outer_dict(data):
     parts = iter(re.findall(rb'"(?:[^"]|\\")*"|[{}\[\]]|[^{}\[\]"]+', data))
@@ -99,6 +130,9 @@ def sign_ecdsa(private_key, data):
     r,s = decode_dss_signature(sig)
     return r.to_bytes(key_size, 'big') + s.to_bytes(key_size, 'big')
 
+def verify_eddsa(public_key, data, sig):
+    public_key.verify(sig, data)
+
 def verify_rsapss(public_key, data, sig):
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -118,6 +152,7 @@ def sign_rsapss(private_key, data):
 
 SIGNATURE_METHODS = {
     "ecdsa": verify_ecdsa,
+    "eddsa": verify_eddsa,
     'rsapss': verify_rsapss,
 }
 
@@ -222,12 +257,13 @@ class PrivateKeyStore(object):
         return self.keys[key_id]
 
 def load_key(key):
+    data = base64url_decode(key['keyval']['public'])
     if key['keytype'] in ['ecdsa-x509', 'rsa-x509']:
-        data = base64url_decode(key['keyval']['public'])
         cert = x509.load_pem_x509_certificate(data, backend=default_backend())
         return cert.public_key()
+    elif key['keytype'] == 'ed25519':
+        return Ed25519PublicKey.from_public_bytes(data)
     else:
-        data = base64url_decode(key['keyval']['public'])
         return load_der_public_key(data, backend=default_backend())
 
 HASH_ALGORITHMS = {
@@ -249,7 +285,7 @@ def check_hashes(bytes, hashes):
 def generate_hashes(bytes):
     result = { "hashes":{}, "length": len(bytes) }
     for hash_name, hash_function in HASH_ALGORITHMS.items():
-        result['hashes'][hash_name] = base64.encodebytes(hash_function(bytes).digest()).decode().strip()
+        result['hashes'][hash_name] = standard_b64encode(hash_function(bytes).digest()).decode().strip()
     return result
 
 
@@ -342,7 +378,7 @@ class Root(Metafile):
             certs = trust_pinning["certs"]
             if store._hub.repository in certs:
                 key_ids = certs[store._hub.repository]
-                root_keys = root.get_keys('root')
+                root_keys = self.get_keys('root')
                 for key_id in key_ids:
                     if key_id in root_keys:
                         bytes = encode_json(root_keys[key_id])
@@ -371,12 +407,24 @@ class Root(Metafile):
         roles[role]['keyids'].append(key_id)
         keys[key_id] = key_dict
         self.dirty = True
+        return key_id
 
+    def add_root_key(self, private_key, repository):
+        certificate = generate_certificate(private_key, repository)
+        keyval = certificate.public_bytes(Encoding.PEM)
+        key_dict = {
+            'keytype': 'ecdsa-x509',
+            'keyval': {
+                'private': None,
+                'public': standard_b64encode(keyval).decode('utf8'),
+            }
+        }
+        return self.add_key(None, key_dict, 'root')
 
 class Targets(Metafile):
     name = "targets"
     EXPIRATION_DELAY = 3 * 365 * 24 * 3600 #seconds
-    INITIAL_BYTES = b'{"signed":{"_type":"Targets","delegations":{"keys":{},"roles":{}},"targets":{}}}'
+    INITIAL_BYTES = b'{"signed":{"_type":"Targets","delegations":{"keys":{},"roles":[]},"targets":{}}}'
 
     def get_keys(self, role):
         roles = self.data['signed']['delegations']['roles']
@@ -552,19 +600,25 @@ class Notary(object):
             self.snapshot.update(self.targets)
             updates.append(self.targets)
         if self.root.dirty:
-            root_keys = self.root.get_keys('root')
-            if root_keys:
-                root_key = self._private_key_store.get(list(root_keys)[0], "Root")
+            root_key = self._private_key_store.get_root()
+            key_ids = self.root.get_keys('root')
+            if key_ids:
+                public_root_key = root_keys.public_key()
+                for key_id, key in key_ids.items():
+                    # find the root key
+                    if key == public_root_key:
+                        break
+                else:
+                    raise ValueError("wrong root key")
             else:
-                root_key = self._private_key_store.get_root()
-                self.root.add_root_key(root_key)
-            self.root.to_bytes([root_key])
-            self.snapshot.update(self.root)
+                key_id = self.root.add_root_key(root_key, self._json_store._hub.repository)
             if snapshot_keys is None:
-                self.root.add_key(None, self._json_store.get_snapshot_key())
-            self.root.add_key(None, self._json_store.get_timestamp_key())
+                self.root.add_key(None, self._json_store.get_snapshot_key(), "snapshot")
+            self.root.add_key(None, self._json_store.get_timestamp_key(), "timestamp")
+            self.root.to_bytes({key_id: root_key})
+            self.snapshot.update(self.root)
             updates.append(self.root)
         if self.snapshot.dirty and snapshot_keys is not None:
             self.snapshot.to_bytes(snapshot_keys)
             updates.append(self.snapshot)
-        self._json_store.publish(updates)
+        return self._json_store.publish(updates)
