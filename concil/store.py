@@ -13,7 +13,7 @@ from .dockerhub import DockerHub, parse_docker_url
 from .notary import Notary, check_hashes
 logger = logging.getLogger(__name__)
 
-TAR2SQFS = ["tar2sqfs"]
+TAR2SQFS = ["tar2sqfs", "-c", "zstd", "-X", "level=10"]
 
 def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=None):
     auth = ""

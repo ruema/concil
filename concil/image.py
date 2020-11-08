@@ -6,7 +6,7 @@ import gzip
 import subprocess
 import shutil
 import io
-from hashlib import sha256
+from hashlib import sha256, sha512
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 from jwcrypto import jwk, jwe
 from jwcrypto.common import base64url_decode, base64url_encode
 from .store import IMAGE_CONVERTERS
+from .dockerhub import DockerHub
 
 class FormatError(Exception):
     pass
@@ -112,6 +113,8 @@ class Descriptor:
                 self._unpacked_digest = self.digest
             elif self.media_type == 'tar+gzip':
                 self._unpacked_digest = calculate_gziped_digest(self.filename)
+            elif self.media_type.endswith('+encrypted'):
+                self._unpacked_digest = self.digest
             else:
                 raise RuntimeError()
         return self._unpacked_digest
@@ -325,3 +328,37 @@ class ImageManifest:
         with (path / "version").open("w", encoding="utf8") as output:
             output.write(self.DIRECTORY_TRANSPORT)
 
+    def publish(self, docker_url, manifest_format=None):
+        if manifest_format is None:
+            manifest_format = self.manifest_format
+        manifest = {
+            "schemaVersion":2,
+        }
+        if manifest_format != self.MANIFEST_OCI_MEDIA_TYPE:
+            manifest["mediaType"] = manifest_format
+        manifest['config'] = self._descriptor_to_dict(manifest_format, self.config)
+        manifest['layers'] = [
+            self._descriptor_to_dict(manifest_format, layer)
+            for layer in self.layers
+        ]
+        
+        hub = DockerHub(docker_url)
+        for layer in self.layers:
+            if hub.has_blob(layer.digest):
+                print(f"Blob {layer.digest} found.")
+            else:
+                print(f"Blob {layer.digest} uploading...")
+                hub.post_blob(str(layer.filename))
+                print("finished.")
+        if hub.has_blob(self.config.digest):
+            print(f"Config {self.config.digest} found.")
+        else:
+            print(f"Config {self.config.digest} uploading...")
+            hub.post_blob(str(self.config.filename))
+            print("finished.")
+        print("Writing manifest to image destination.")
+        data = json.dumps(manifest).encode()
+        hub.post_manifest(data)
+        sha256_digest = sha256(data).hexdigest()
+        sha512_digest = sha512(data).hexdigest()
+        print(f"{len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")

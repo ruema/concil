@@ -20,18 +20,15 @@ class StoreConfig(Config):
             if layer["mediaType"].endswith("+encrypted"):
                 filename += ',' + self.get_key(layer)
             layers[filepath.name] = filename
-
-        layers = [ for l in self.manifest['layers']]
-        diff_ids = {l.name: str(l) for l in layers}
         return [layers[diff_id] for diff_id in self.image_config['rootfs']['diff_ids']]
 
 
 def main():
     if len(sys.argv) <= 1:
-        print("Usage: concil_run.py <docker_url> [-p private_key.pem] [-v volume] args")
+        print("Usage: concil_run.py <docker_url|filename> [-p private_key.pem] [-v volume] args")
         return
     
-    docker_url = sys.argv[1]
+    filename = sys.argv[1]
     volumes = []
     args = sys.argv[2:]
     if args and args[0] == '-p':
@@ -44,13 +41,16 @@ def main():
         args = args[2:]
     if args and args[0] == '--':
         args = args[1:]
-        
-    parts = parse_docker_url(docker_url)
-    username = parts.username or os.environ.get('CONCIL_STORE_USER')
-    password = parts.username or os.environ.get('CONCIL_STORE_PASSWORD')
-    full_url = unsplit_url(parts.scheme, parts.hostname, parts.port, parts.path, username, password)
-    store = Store(full_url)
-    config = StoreConfig(store, private_key)
+
+    if filename.startswith('docker://'):
+        parts = parse_docker_url(filename)
+        username = parts.username or os.environ.get('CONCIL_STORE_USER')
+        password = parts.username or os.environ.get('CONCIL_STORE_PASSWORD')
+        full_url = unsplit_url(parts.scheme, parts.hostname, parts.port, parts.path, username, password)
+        store = Store(full_url)
+        config = StoreConfig(store, private_key)
+    else:
+        config = Config(filename, private_key)
     run(config, args, volumes)
 
 if __name__ == '__main__':

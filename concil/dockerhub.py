@@ -1,3 +1,4 @@
+import os
 import re
 import urllib
 import requests
@@ -80,17 +81,15 @@ class DockerHub(object):
         response = self.request("POST", self.url + "/blobs/uploads/")
         location = response.headers['Location']
         with open(filename, 'rb') as input:
-            reponse = self.session.put(location,
-                params={"digest": "sha256:" + filename},
+            response = self.session.put(location,
+                params={"digest": "sha256:" + os.path.basename(filename)},
                 headers={"Content-Type": "application/octet-stream"},
                 data=input)
-        if response.status_code != 202:
-            raise RuntimeError()
+        if response.status_code != 201:
+            raise RuntimeError(response.text)
         return response
 
-    def post_manifest(self, filename):
-        with open(filename, 'rb') as inp:
-            data = inp.read()
+    def post_manifest(self, data):
         return self.request("PUT", self.url + "/manifests/" + self.tag,
             headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
             data=data,
@@ -101,11 +100,19 @@ class DockerHub(object):
         response.raise_for_status()
         return response
 
+    def has_blob(self, digest):
+        try:
+            _ = self.request("HEAD", self.url + "/blobs/" + digest)
+        except requests.HTTPError as error:
+            if error.response.status_code == 404:
+                return False
+            raise
+        return True
+
     def open_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
         headers = {"Accept": accept} if accept else {}
         tag = self.tag if not hash else hash
         response = self.request("GET", self.url + "/manifests/" + tag, headers=headers, stream=True)
-        response.raise_for_status()
         return response
 
     def get_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):

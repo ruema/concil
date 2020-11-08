@@ -4,7 +4,8 @@ from .image import ImageManifest, Descriptor
 from . import store
 from cryptography.hazmat.backends import default_backend
 from jwcrypto import jwk
-
+import urllib3.exceptions
+import warnings
 
 def generate_key(outputfilename, password):
     key = jwk.JWK.generate(kty='EC', crv='P-521')    
@@ -14,31 +15,18 @@ def generate_key(outputfilename, password):
         output.write(key.export_to_pem())
 
 
-def main():
-    store.TAR2SQFS = ["tar2sqfs", "-c", "zstd", "-X", "level=19"]
-    parser = argparse.ArgumentParser(description='Convert container images.')
-    parser.add_argument('source-image', help='source directory')
-    parser.add_argument('destination-image', help='destination directory')
-    parser.add_argument('--squashfs', action='store_true',
-        help='convert layers to squashfs')
-    parser.add_argument('--encryption', metavar="key", nargs="+",
-        help='encryption keys')
-    parser.add_argument('--list-layers', action='store_true', help='List layers')
-    parser.add_argument('--remove-layer', metavar="layer", nargs="+",
-        help='ID of layers to remove')
-    parser.add_argument('--add-layer', metavar="layer", nargs="+",
-        help='filename of new layers appended')
-    args = parser.parse_args()
+def do_list(args):
+    image = ImageManifest.from_path(args.image)
+    print(f"{'Digest':65s} {'Size':12s} Media-Type")
+    for layer in image.layers:
+        print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type}")
+
+def do_copy(args):
     keys = []
     for key in args.encryption or []:
         with open(key, 'rb') as inp:
             keys.append(jwk.JWK.from_pem(inp.read()))
     image = ImageManifest.from_path(getattr(args,'source-image'))
-    if args.list_layers:
-        print(f"{'Digest':65s} {'Size':12s} Media-Type")
-        for layer in image.layers:
-            print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type}")
-        return
     if args.remove_layer:
         to_be_removed = tuple(args.remove_layer)
         print(f"{'Digest':65s} {'Size':12s} Media-Type")
@@ -70,6 +58,45 @@ def main():
     for layer in image.layers:
         layer.encryption_keys = keys
     image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
+
+def do_publish(args):
+    image = ImageManifest.from_path(args.image)
+    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE)
+
+def main():
+    warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
+    store.TAR2SQFS = ["tar2sqfs", "-c", "zstd", "-X", "level=19"]
+    parser = argparse.ArgumentParser(description='Convert container images.')
+    subparsers = parser.add_subparsers(help='sub-command help', dest='cmd')
+    parser_list = subparsers.add_parser('list', help='list layers of image')
+    parser_list.add_argument('image', help='image directory')
+    
+    parser_copy = subparsers.add_parser('copy', help='modify the layers of image')
+    parser_copy.add_argument('source-image', help='source directory')
+    parser_copy.add_argument('destination-image', help='destination directory')
+    parser_copy.add_argument('--squashfs', action='store_true',
+        help='convert layers to squashfs')
+    parser_copy.add_argument('--encryption', metavar="key", nargs="+",
+        help='encryption keys')
+    parser_copy.add_argument('--remove-layer', metavar="layer", nargs="+",
+        help='ID of layers to remove')
+    parser_copy.add_argument('--add-layer', metavar="layer", nargs="+",
+        help='filename of new layers appended')
+
+    parser_publish = subparsers.add_parser('publish', help='publish image to docker hub')
+    parser_publish.add_argument('image', help='image directory')
+    parser_publish.add_argument('docker-url', help='docker url of the form docker://host/repository:tag')
+
+    args = parser.parse_args()
+    
+    if args.cmd == 'list':
+        do_list(args)
+    elif args.cmd == 'copy':
+        do_copy(args)
+    elif args.cmd == 'publish':
+        do_publish(args)
+    else:
+        raise RuntimeError()
 
 if __name__ == "__main__":
     main()
