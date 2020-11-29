@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID, SignatureAlgorithmOID
 from cryptography import x509
 from .dockerhub import DockerHub
-from requests
+import requests
 import logging
 logger = logging.getLogger(__name__)
 

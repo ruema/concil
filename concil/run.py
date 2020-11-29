@@ -109,10 +109,11 @@ def mount_volumes(mount_point, layers, volumes):
         mount_dir(mount_point, source_path, mount_path, None, flags | MS_BIND | MS_REC)
 
 def mount_std_volumes(mount_point):
-    mount_dir(mount_point, "proc", "proc", "proc", 0);
-    mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC);
-    mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0);
-    mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0);
+    mount_dir(mount_point, "proc", "proc", "proc", 0)
+    mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
+    mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
+    mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
+    mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
 
 class Config:
     def __init__(self, manifest_filename, private_key=None):
