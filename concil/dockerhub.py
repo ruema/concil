@@ -78,9 +78,11 @@ class DockerHub(object):
         return response
 
     def post_blob(self, filename):
+        self.session.cookies.clear()
         response = self.request("POST", self.url + "/blobs/uploads/")
         location = response.headers['Location']
         with open(filename, 'rb') as input:
+            self.session.cookies.clear()
             response = self.session.put(location,
                 params={"digest": "sha256:" + os.path.basename(filename)},
                 headers={"Content-Type": "application/octet-stream"},
@@ -90,6 +92,7 @@ class DockerHub(object):
         return response
 
     def post_manifest(self, data):
+        self.session.cookies.clear()
         return self.request("PUT", self.url + "/manifests/" + self.tag,
             headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
             data=data,

@@ -89,20 +89,116 @@ def encrypt(input_stream, encrypted_filename):
     }
     return pub_data, payload, sha_hash_encrypted
 
+
+class _Stream:
+    def __init__(self):
+        self.buf = b""
+        self.pos = 0
+        self.closed = False
+
+    def tell(self):
+        return self.pos
+
+    def write(self, buf):
+        self.buf += buf
+
+    def close(self):
+        self.closed = True
+
+class MergedIO:
+    def __init__(self, fileobjects):
+        self.stream = _Stream()
+        self.processor = self.process(fileobjects)
+
+    def process(self, fileobjects):
+        seen = set()
+        output = TarFile.open(fileobj=stream, mode="w:")
+        for fileobject in fileobjects:
+            tarfile = Tarfile.open(fileobj=fileobject, mode="r|")
+            for info in tarfile:
+                output.addfile(self, info)
+                yield
+                if info.sparse is not None:
+                    size = sum(size for offset, size in info.sparse)
+                else:
+                    size = tarinfo.size
+                blocks = (size + BLOCKSIZE - 1) // BLOCKSIZE
+                while blocks > 0:
+                    cnt = 32 if blocks > 32 else blocks
+                    buf = tarfile.fileobj.read(cnt * BLOCKSIZE)
+                    output.fileobj.write(buf)
+                    yield
+                    blocks -= cnt
+        output.close()
+        stream.close()
+        yield
+
+        
+    def read(self, length):
+        while len(self.stream.buf) < length:
+            if self.stream.closed:
+                break
+            next(self.processor)
+        buf = self.stream.buf
+        result = buf[:length]
+        self.stream.buf = buf[length:]
+        return result
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        return
+
+
+class ZipStream:
+    def __init__(self, input_stream):
+        self.input_stream = input_stream
+        self.buffer = b''
+        self.finished = False
+        self.gzipper = gzip.open(self, 'wb')
+
+    def write(self, data):
+        self.buffer += data
+        
+    def read(self, length):
+        while not self.finished and len(self.buffer) < length:
+            buf = self.input_stream.read(10240)
+            if buf:
+                self.gzipper.write(buf)
+            else:
+                self.finished = True
+                self.gzipper.close()
+        buf = self.buffer[:length]
+        self.buffer = self.buffer[length:]
+        return buf
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        return
+    
+
 class Descriptor:
-    def __init__(self, filename, media_type, digest, size, annotations=None):
+    def __init__(self, filename, media_type, digest, annotations=None):
         self.filename = filename
         self.media_type = media_type
         if digest is None:
-            digest = calculate_digest(filename)
+            digest = "dir:xxxxxxxxxxxxxxx" if media_type == "dir" else calculate_digest(filename)
         self.digest = digest
         self._unpacked_digest = None
         self.data = None
-        self.size = size
         self.annotations = annotations if annotations is not None else {}
-        self.converted_media_type = None
+        self.converted_media_type = "tar+gzip" if media_type == "dir" else None
         self.encryption_keys = []
         self.status = 'keep'
+
+    @property
+    def size(self):
+        if self.data:
+            return len(self.data)
+        return self.filename.stat().st_size
 
     @property
     def unpacked_digest(self):
@@ -115,8 +211,10 @@ class Descriptor:
                 self._unpacked_digest = calculate_gziped_digest(self.filename)
             elif self.media_type.endswith('+encrypted'):
                 self._unpacked_digest = self.digest
+            elif self.media_type == "dir":
+                self._unpacked_digest = self.digest
             else:
-                raise RuntimeError()
+                raise RuntimeError(self.media_type)
         return self._unpacked_digest
 
     def convert(self, media_type):
@@ -127,30 +225,67 @@ class Descriptor:
     def from_data(cls, data, media_type, annotations=None):
         hash = sha256(data).hexdigest()
         digest = f"sha256:{hash}"
-        result = cls(None, media_type, digest, len(data), annotations)
+        result = cls(None, media_type, digest, annotations)
         if media_type in ("tar+gzip", "tar+zstd"):
             raise NotImplemented()
         else:
             result._unpacked_digest = digest
         result.data = data
         return result
-
-    def export(self, path):
-        temporary_file = None
-        if self.data:
-            input_stream = io.BytesIO(self.data)
+    
+    def as_tar_stream(self):
+        if self.media_type == 'squashfs':
+            raise NotImplemented()
+        if self.media_type == 'dir':
+            import tarfile
+            stream = io.BytesIO()
+            tar = tarfile.open(fileobj=stream, mode="w")
+            tar.add(self.filename, arcname='/')
+            stream.seek(0)
+            return stream
+        elif self.data:
+            stream = io.BytesIO(self.data)
         else:
-            input_stream = self.filename.open('rb')
-        if self.converted_media_type is None:
+            stream = self.filename.open('rb')
+        if self.media_type == 'tar':
+            return stream
+        if self.media_type == 'tar+gzip':
+            return gzip.open(stream, 'rb')
+        raise NotImplemented()
+
+    def export(self, path, merge_with=None):
+        if self.converted_media_type is None and not self.encryption_keys and not merge_with:
+            if self.data:
+                input_stream = io.BytesIO(self.data)
+            else:
+                input_stream = self.filename.open('rb')
+            print(f"Copy {self.digest} ({self.media_type})")
+            output_filename = path / self.digest.split(':', 1)[1]
+            with input_stream, output_filename.open('wb') as output:
+                shutil.copyfileobj(input_stream, output)
+            return type(self)(output_filename, self.media_type, self.digest, self.annotations)
+
+        media_type = self.converted_media_type or self.media_type
+        temporary_file = None
+        if merge_with:
+            input_stream = MergedIO([self.as_tar_stream()] + [m.as_tar_stream() for m in merge_with])
+        else:
+            input_stream = self.as_tar_stream()
+        if media_type in ['tar+gzip', 'tar']:
+            if media_type == 'tar+gzip':
+                input_stream = ZipStream(input_stream)
             if not self.encryption_keys:
-                output_filename = path / self.digest.split(':', 1)[1]
-                with input_stream, output_filename.open('wb') as output:
+                print(f"Copy {self.digest} ({self.media_type})")
+                temp_filename = path / "temp"
+                with input_stream, temp_filename.open('wb') as output:
                     shutil.copyfileobj(input_stream, output)
-                return type(self)(output_filename, self.media_type, self.digest, self.size, self.annotations)
-            media_type = self.media_type
-        elif self.converted_media_type == "squashfs":
-            print(f"Convert {self.media_type}")
-            convert = IMAGE_CONVERTERS.get(self.media_type)
+                digest = calculate_digest(temp_filename)
+                output_filename = path / digest.split(':', 1)[1]
+                temp_filename.rename(output_filename)
+                return type(self)(output_filename, media_type, digest, self.annotations)
+        elif media_type == "squashfs":
+            print(f"Convert {self.digest}: {self.media_type} -> {self.converted_media_type}")
+            convert = IMAGE_CONVERTERS.get('tar')
             if convert is None:
                 raise NotImplemented()
             squash_filename = path / f"{self.digest}.sq"
@@ -160,16 +295,15 @@ class Descriptor:
                 digest = calculate_digest(squash_filename)
                 output_filename = squash_filename.with_name(digest.split(':',1)[1])
                 squash_filename.rename(output_filename)
-                return type(self)(output_filename, self.converted_media_type, digest, output_filename.stat().st_size, self.annotations)
+                return type(self)(output_filename, self.converted_media_type, digest, self.annotations)
             else:
                 temporary_file = squash_filename
                 input_stream = squash_filename.open('rb')
-                media_type = "squashfs"
         else:
             raise NotImplemented()
 
         assert self.encryption_keys
-        print(f"Encrypt {media_type}")
+        print(f"Encrypt {self.digest}")
         encrypted_filename = path / "enc"
         pub_data, payload, sha_hash_encrypted = encrypt(input_stream, encrypted_filename)
 
@@ -188,7 +322,7 @@ class Descriptor:
         if temporary_file is not None:
             temporary_file.unlink()
         result = type(self)(output_filename, media_type + "+encrypted",
-            f"sha256:{sha_hash_encrypted}", output_filename.stat().st_size,
+            f"sha256:{sha_hash_encrypted}",
             annotations)
         result._unpacked_digest = result.digest
         return result
@@ -244,9 +378,9 @@ class ImageManifest:
         media_type = meta['mediaType']
         media_type = cls._REVERSED_MEDIA_TYPES.get(media_type, media_type)
         digest = meta['digest']
-        size = meta['size']
         annotations = meta.get('annotations', {})
-        return Descriptor(path / digest.split(':', 1)[1], media_type, digest, size, annotations)
+        filename = path / digest.split(':', 1)[1]
+        return Descriptor(filename, media_type, digest, annotations)
 
     @classmethod
     def from_path(cls, path):
@@ -299,7 +433,10 @@ class ImageManifest:
             if layer.status == 'remove':
                 new_digest = None
             else:
-                exported = layer.export(path)
+                if layer.status == 'merge':
+                    exported = layer.export(path, layer.merge_with)
+                else:
+                    exported = layer.export(path)
                 new_digest = exported.unpacked_digest
                 export_layers.append(exported)
                 if layer.status == 'new':
@@ -328,9 +465,9 @@ class ImageManifest:
         with (path / "version").open("w", encoding="utf8") as output:
             output.write(self.DIRECTORY_TRANSPORT)
 
-    def publish(self, docker_url, manifest_format=None):
+    def publish(self, docker_url, manifest_format=None, root_certificate=None):
         from .store import Store
-        from notary import generate_hashes
+        from .notary import generate_hashes
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = {
@@ -368,5 +505,6 @@ class ImageManifest:
         notary = store._notary
         if notary is not None:
             hashes = generate_hashes(data)
-            notary.add_target(store.url.tag, hashes)
-            notary.publish()
+            notary.add_target_hashes(store.url.tag, hashes)
+            notary.publish(root_certificate)
+

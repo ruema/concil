@@ -1,8 +1,10 @@
+#!/usr/bin/env python3
 import sys
 import os
 from concil.dockerhub import parse_docker_url
 from concil.store import unsplit_url, Store
 from concil.run import Config, run
+import logging
 
 class StoreConfig(Config):
     def __init__(self, store, private_key=None):
@@ -20,6 +22,8 @@ class StoreConfig(Config):
             if layer["mediaType"].endswith("+encrypted"):
                 filename += ',' + self.get_key(layer)
             layers[filepath.name] = filename
+        # now is a good time to cleanup the cache
+        self.store.cache_cleanup()
         return [layers[diff_id] for diff_id in self.image_config['rootfs']['diff_ids']]
 
 
@@ -27,10 +31,16 @@ def main():
     if len(sys.argv) <= 1:
         print("Usage: concil_run.py <docker_url|filename> [-p private_key.pem] [-v volume] args")
         return
+    args = sys.argv[1:]
+    if args[0] == "--debug":
+        logging.basicConfig(level=logging.DEBUG)
+        args = args[1:]
+    else:
+        logging.basicConfig(level=logging.WARNING)
     
-    filename = sys.argv[1]
+    filename = args[0]
     volumes = []
-    args = sys.argv[2:]
+    args = args[1:]
     if args and args[0] == '-p':
         private_key = args[1]
         args = args[2:]
@@ -44,14 +54,20 @@ def main():
 
     if filename.startswith('docker://'):
         parts = parse_docker_url(filename)
-        username = parts.username or os.environ.get('CONCIL_STORE_USER')
-        password = parts.username or os.environ.get('CONCIL_STORE_PASSWORD')
-        full_url = unsplit_url(parts.scheme, parts.hostname, parts.port, parts.path, username, password)
+        if "@" in parts.netloc:
+            full_url = filename
+        else:
+            username = os.environ.get('CONCIL_STORE_USER')
+            password = os.environ.get('CONCIL_STORE_PASSWORD')
+            if username:
+                full_url = unsplit_url(parts.scheme, parts.netloc, parts.path, username, password)
+            else:
+                full_url = filename
         store = Store(full_url)
         config = StoreConfig(store, private_key)
     else:
         config = Config(filename, private_key)
-    run(config, args, volumes)
+    sys.exit(run(config, args, volumes))
 
 if __name__ == '__main__':
     main()

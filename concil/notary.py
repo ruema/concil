@@ -228,6 +228,7 @@ class PrivateKeyStore(object):
                 break
             print("Passwords differ.")
         data = key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, BestAvailableEncryption(password.encode('utf8')))
+        self.path.mkdir(parents=True, exist_ok=True)
         (self.path / f'{key_id}.key').write_bytes(
             b"-----BEGIN ENCRYPTED PRIVATE KEY-----\n" +
             ("gun: %s\n" % repository if repository else "").encode('utf8') +
@@ -370,15 +371,23 @@ class Root(Metafile):
         keyids = roles[role]['keyids']
         return {k: keys[k] for k in keyids}
 
-    def verify_trust_pinning(self, config):
+    def verify_trust_pinning(self, config, repository):
         if "trust_pinning" not in config:
             # without trust_pinning, verification succeeds always
             return
         trust_pinning = config["trust_pinning"]
         if "certs" in trust_pinning:
             certs = trust_pinning["certs"]
-            if store._hub.repository in certs:
-                key_ids = certs[store._hub.repository]
+            if repository in certs:
+                key_ids = certs[repository]
+            else:
+                key_ids = None
+                longest = 0
+                for repo, ids in certs.items():
+                    if repo.endswith('*') and len(repo) > longest and repository.startswith(repo[:-1]):
+                        longest = len(repo)
+                        key_ids = ids
+            if key_ids is not None:
                 root_keys = self.get_keys('root')
                 for key_id in key_ids:
                     if key_id in root_keys:
@@ -389,7 +398,7 @@ class Root(Metafile):
                 raise RuntimeError("no valid key-id")
         if "ca" in trust_pinning:
             cas = trust_pinning["ca"]
-            if store._hub.repository in ca:
+            if repository in ca:
                 # TODO: implement ca validation
                 raise NotImplementedError()
         if trust_pinning.get("disable_tofu", False):
@@ -421,6 +430,25 @@ class Root(Metafile):
             }
         }
         return self.add_key(None, key_dict, 'root')
+
+    def add_root_certificate(self, private_key, certificate):
+        with open(certificate, 'rb') as input:
+            keyval = input.read()
+        # check data format
+        cert = x509.load_pem_x509_certificate(keyval, backend=default_backend())
+        p1 = private_key.public_key()
+        p2 = cert.public_key()
+        if p1.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH) != p2.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH):
+            raise RuntimeError("certificate does not match root key")
+        key_dict = {
+            'keytype': 'ecdsa-x509',
+            'keyval': {
+                'private': None,
+                'public': standard_b64encode(keyval).decode('utf8'),
+            }
+        }
+        return self.add_key(None, key_dict, 'root')
+
 
 class Targets(Metafile):
     name = "targets"
@@ -485,8 +513,8 @@ class JsonStore(object):
             if cached_metafile is not None:
                 # check root signature with old root
                 metafile.verify_sign(cached_metafile)
-            else:
-                metafile.verify_trust_pinning(self.config)
+            # Regardless of having a previous root or not, confirm that the new root validates against the trust pinning
+            metafile.verify_trust_pinning(self.config, self._hub.repository)
         filename.parent.mkdir(exist_ok=True, parents=True)
         filename.write_bytes(bytes)
         return metafile
@@ -576,11 +604,11 @@ class Notary(object):
     def add_target(self, target, filename, role=None):
         bytes = Path(filename).read_bytes()
         hashes = generate_hashes(bytes)
-        self.add_target_hash(target, hashes)
+        self.add_target_hashes(target, hashes)
 
-    def add_target_hash(self, target, hashes, role=None):
+    def add_target_hashes(self, target, hashes, role=None):
         targets = self.targets if role is None else self.delegate_targets[role]
-        targets.add_target_hash(target, hashes)
+        targets.add_target_hashes(target, hashes)
 
     def _get_keys(self, role):
         key_ids = self.root.get_keys(role)
@@ -596,7 +624,7 @@ class Notary(object):
             keys = {key_id: key}
         return keys
 
-    def publish(self):
+    def publish(self, root_certificate=None):
         # TODO: delgate targets
         updates = []
         if self.targets.dirty:
@@ -614,7 +642,7 @@ class Notary(object):
             root_key = self._private_key_store.get_root()
             key_ids = self.root.get_keys('root')
             if key_ids:
-                public_root_key = root_keys.public_key()
+                public_root_key = root_key.public_key()
                 for key_id, key in key_ids.items():
                     # find the root key
                     if key == public_root_key:
@@ -622,7 +650,10 @@ class Notary(object):
                 else:
                     raise ValueError("wrong root key")
             else:
-                key_id = self.root.add_root_key(root_key, self._json_store._hub.repository)
+                if root_certificate:
+                    key_id = self.root.add_root_certificate(root_key, root_certificate)
+                else:
+                    key_id = self.root.add_root_key(root_key, self._json_store._hub.repository)
             if snapshot_keys is None:
                 self.root.add_key(None, self._json_store.get_snapshot_key(), "snapshot")
             self.root.add_key(None, self._json_store.get_timestamp_key(), "timestamp")

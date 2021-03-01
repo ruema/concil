@@ -93,10 +93,12 @@ def do_copy(args):
             elif path.suffix == '.tar':
                 media_type = 'tar'
             elif path.suffix in ('.gz', '.tgz'):
-                media_type = 'tar+gz'
+                media_type = 'tar+gzip'
+            elif path.is_dir():
+                media_type = 'dir'
             else:
                 raise RuntimeError("unsupported file type")
-            layer = Descriptor(path, media_type, None, path.stat().st_size)
+            layer = Descriptor(path, media_type, None)
             layer.status = 'new'
             print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type} added.")
             image.layers.append(layer)
@@ -109,7 +111,7 @@ def do_copy(args):
 
 def do_publish(args):
     image = ImageManifest.from_path(args.image)
-    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE)
+    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE, args.root_certificate)
 
 def main():
     warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
@@ -134,6 +136,7 @@ def main():
         help='filename of new layers appended')
 
     parser_publish = subparsers.add_parser('publish', help='publish image to docker hub')
+    parser_publish.add_argument('--root-certificate', action='store', help='root certificate')
     parser_publish.add_argument('image', help='image directory')
     parser_publish.add_argument('docker-url', help='docker url of the form docker://host/repository:tag')
 

@@ -93,7 +93,10 @@ def get_mount_point():
 def mount_dir(mount_point, source, target, type, options):
     target_path = os.path.join(mount_point, target)
     if libc.mount(source.encode(), target_path.encode(), None if not type else type.encode(), options, None):
-        raise RuntimeError("Mounting %s failed\n" % target)
+        # ignore error if source does not exist
+        errno = ctypes.get_errno()
+        if errno != 22:
+            raise RuntimeError("Mounting %s failed (%s)\n" % (target, errno))
 
 def sq_mount(layers, mount_path):
     """mount a squash image"""
@@ -113,7 +116,9 @@ def mount_std_volumes(mount_point):
     mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
     mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
+    mount_dir(mount_point, "/home/y1rmk/temp/udo/concil/3/concil-1.0.0-beta.1/hosts", "etc/hosts", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
+
 
 class Config:
     def __init__(self, manifest_filename, private_key=None):
@@ -220,13 +225,15 @@ def run_child(config, args=None, volumes=None):
         if libc.chroot(mount_point.encode()):
             raise RuntimeError("chroot failed: %s" % ctypes.get_errno())
         os.chdir(config.working_dir)
-        # os.execve("/bin/sh", ["/bin/sh"], environment)
+        # commandline = ["/bin/sh"]
         os.execve(commandline[0], commandline, environment)
-    else:
-        os.waitpid(pid, 0)
-    print("finished\n")
+        raise RuntimeError("exec failed: %s" % ctypes.get_errno())
+    pid, status = os.waitpid(pid, 0)
     unmount(mount_point)
     os.rmdir(mount_point)
+    if status & 0xff:
+        raise RuntimeError("program ended with signal %x" % status)
+    return status >> 8
 
 def run(config, args=None, volumes=None):
     if "architecture" in config.image_config and config.image_config["architecture"] != PLATFORMS[platform.machine()]:
@@ -235,10 +242,12 @@ def run(config, args=None, volumes=None):
         raise RuntimeError("unsupported os")
     pid = clone()
     if pid == 0:
-        run_child(config, args, volumes)
-        os._exit(0)
-    else:
-        os.waitpid(pid, 0)
+        status = run_child(config, args, volumes)
+        os._exit(status)
+    pid, status = os.waitpid(pid, 0)
+    if status & 0xff:
+        raise RuntimeError("program ended with signal %x" % status)
+    return status >> 8
     
 def main():
     if len(sys.argv) <= 1:
@@ -258,7 +267,7 @@ def main():
     if args and args[0] == '--':
         args = args[1:]
     config = Config(config_filename, private_key)
-    run(config, args, volumes)
+    sys.exit(run(config, args, volumes))
 
 if __name__ == '__main__':
     main()

@@ -1,3 +1,4 @@
+import os
 import base64
 import json
 import hashlib
@@ -13,19 +14,18 @@ from .dockerhub import DockerHub, parse_docker_url
 from .notary import Notary, check_hashes
 logger = logging.getLogger(__name__)
 
-TAR2SQFS = ["tar2sqfs", "-c", "zstd", "-X", "level=10"]
+TAR2SQFS = [os.path.join(os.path.dirname(__file__), "tar2sqfs"), "-c", "zstd", "-X", "level=10"]
 
-def unsplit_url(scheme, hostname, port=None, path=None, username=None, password=None):
+def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=None):
     auth = ""
-    if username:
+    if "@" not in netloc and username:
         if password:
             auth = f"{username}:{password}@"
         else:
             auth = f"{username}@"
+    url = f"{scheme}://{auth}{netloc}"
     if port:
-        url = f"{scheme}://{auth}{hostname}:{port}"
-    else:
-        url = f"{scheme}://{auth}{hostname}"
+        url += f":{port}"
     if path:
         if path.startswith('/'):
             url += path
@@ -107,9 +107,9 @@ class Store:
                 registry_url = info.get('registry')
                 notary_url = info.get('notary')
         if registry_url is None:
-            registry_url = unsplit_url("https", url.hostname, url.port)
+            registry_url = unsplit_url("https", url.netloc)
         registry_url = parse_docker_url(registry_url)
-        full_url = unsplit_url(registry_url.scheme, registry_url.hostname, registry_url.port, url.path, url.username, url.password)
+        full_url = unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
         logger.debug("full registry url: %s", full_url)
         self._hub = DockerHub(full_url, verify=verify)
         if disable_content_trust:
@@ -121,17 +121,26 @@ class Store:
             else:
                 notary_url = parse_docker_url(notary_url)
                 port = notary_url.port
-            path = f"{url.hostname}/{url.repository}"
-            full_url = unsplit_url(notary_url.scheme, notary_url.hostname, port, path, url.username, url.password)
+            _, _, hostname = url.netloc.rpartition('@')
+            hostname, _, _ = hostname.partition(':')
+            path = f"{hostname}/{url.repository}"
+            full_url = unsplit_url(notary_url.scheme, notary_url.netloc, path, url.username, url.password, port=port)
             logger.debug("full notary url: %s", full_url)
-            self._notary = Notary(full_url, config={"trust_dir" : self._cache_dir / "notary"}, verify=verify)
+            self._notary = Notary(full_url, config={
+                "trust_dir" : self._cache_dir / "notary",
+                "trust_pinning": config.get("trust_pinning", {}),
+            }, verify=verify)
 
     def cache_cleanup(self):
         cache_time = time.time() - self._cache_timeout
+        to_be_removed = []
         for type in ['manifest', 'config', 'layers']:
             for filename in (self._cache_dir / type).iterdir():
-                if filename.start().st_mtime < cache_time:
-                    filename.unlink()
+                if filename.stat().st_mtime < cache_time:
+                    logging.debug("unlink %s", filename)
+                    to_be_removed.append(filename)
+        for filename in to_be_removed:
+            filename.unlink()
 
     def store_cache(self, type, bytes, digest=None):
         if digest is None:
@@ -151,7 +160,11 @@ class Store:
 
     def get_manifest(self, architecture=None, operating_system=None):
         targets = self._notary.targets.data['signed']['targets']
-        target = targets[self.url.tag]
+        try:
+            target = targets[self.url.tag]
+        except KeyError:
+            logger.warning("tag not found %s", self.url.tag)
+            import sys;sys.exit(9)
         logger.debug("notary target for %s: %r", self.url.tag, target)
         if not target:
             manifest = self._hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
