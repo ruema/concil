@@ -111,17 +111,18 @@ class MergedIO:
         self.processor = self.process(fileobjects)
 
     def process(self, fileobjects):
+        from tarfile import TarFile, BLOCKSIZE
         seen = set()
-        output = TarFile.open(fileobj=stream, mode="w:")
+        output = TarFile.open(fileobj=self.stream, mode="w:")
         for fileobject in fileobjects:
-            tarfile = Tarfile.open(fileobj=fileobject, mode="r|")
+            tarfile = TarFile.open(fileobj=fileobject, mode="r|")
             for info in tarfile:
-                output.addfile(self, info)
+                output.addfile(info)
                 yield
                 if info.sparse is not None:
                     size = sum(size for offset, size in info.sparse)
                 else:
-                    size = tarinfo.size
+                    size = info.size
                 blocks = (size + BLOCKSIZE - 1) // BLOCKSIZE
                 while blocks > 0:
                     cnt = 32 if blocks > 32 else blocks
@@ -130,7 +131,7 @@ class MergedIO:
                     yield
                     blocks -= cnt
         output.close()
-        stream.close()
+        self.stream.close()
         yield
 
         
@@ -185,7 +186,7 @@ class Descriptor:
         self.filename = filename
         self.media_type = media_type
         if digest is None:
-            digest = "dir:xxxxxxxxxxxxxxx" if media_type == "dir" else calculate_digest(filename)
+            digest = "dir:%s" % filename if media_type == "dir" else calculate_digest(filename)
         self.digest = digest
         self._unpacked_digest = None
         self.data = None
@@ -227,7 +228,7 @@ class Descriptor:
         digest = f"sha256:{hash}"
         result = cls(None, media_type, digest, annotations)
         if media_type in ("tar+gzip", "tar+zstd"):
-            raise NotImplemented()
+            raise NotImplementedError()
         else:
             result._unpacked_digest = digest
         result.data = data
@@ -235,12 +236,16 @@ class Descriptor:
     
     def as_tar_stream(self):
         if self.media_type == 'squashfs':
-            raise NotImplemented()
+            raise NotImplementedError()
         if self.media_type == 'dir':
             import tarfile
             stream = io.BytesIO()
             tar = tarfile.open(fileobj=stream, mode="w")
-            tar.add(self.filename, arcname='/')
+            def mk_root(info):
+                info.uid = info.gid = 0
+                info.uname = info.gname = "root"
+                return info
+            tar.add(self.filename, arcname='/', filter=mk_root)
             stream.seek(0)
             return stream
         elif self.data:
@@ -251,16 +256,24 @@ class Descriptor:
             return stream
         if self.media_type == 'tar+gzip':
             return gzip.open(stream, 'rb')
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def export(self, path, merge_with=None):
         if self.converted_media_type is None and not self.encryption_keys and not merge_with:
+            output_filename = path / self.digest.split(':', 1)[1]
             if self.data:
                 input_stream = io.BytesIO(self.data)
             else:
+                try:
+                    os.link(self.filename, output_filename)
+                    print(f"Link {self.digest} ({self.media_type})")
+                    return type(self)(output_filename, self.media_type, self.digest, self.annotations)
+                except Exception as e:
+                    print(e)
+                    # if anything goes wrong, try to copy
+                    pass
                 input_stream = self.filename.open('rb')
             print(f"Copy {self.digest} ({self.media_type})")
-            output_filename = path / self.digest.split(':', 1)[1]
             with input_stream, output_filename.open('wb') as output:
                 shutil.copyfileobj(input_stream, output)
             return type(self)(output_filename, self.media_type, self.digest, self.annotations)
@@ -287,7 +300,7 @@ class Descriptor:
             print(f"Convert {self.digest}: {self.media_type} -> {self.converted_media_type}")
             convert = IMAGE_CONVERTERS.get('tar')
             if convert is None:
-                raise NotImplemented()
+                raise NotImplementedError()
             squash_filename = path / f"{self.digest}.sq"
             diff_digest = convert(input_stream, squash_filename)
             self._unpacked_digest = f"sha256:{diff_digest}"
@@ -300,7 +313,7 @@ class Descriptor:
                 temporary_file = squash_filename
                 input_stream = squash_filename.open('rb')
         else:
-            raise NotImplemented()
+            raise NotImplementedError()
 
         assert self.encryption_keys
         print(f"Encrypt {self.digest}")
@@ -370,6 +383,7 @@ class ImageManifest:
         self.schema_version = 2
         self.manifest_format = manifest_format if manifest_format is not None else self.MANIFEST_DOCKER_MEDIA_TYPE
         self.config = None
+        self._configuration = None
         self.layers = []
         self.annotations = {}
 
@@ -420,6 +434,12 @@ class ImageManifest:
             result["annotations"] = descriptor.annotations
         return result
 
+    @property
+    def configuration(self):
+        if self._configuration is None:
+            self._configuration = json.loads(self.config.read())
+        return self._configuration
+
     def export(self, path, manifest_format=None):
         path = Path(path)
         path.mkdir()
@@ -442,7 +462,7 @@ class ImageManifest:
                 if layer.status == 'new':
                     new_diffs.append(new_digest)
             digests[digest] = new_digest
-        config = json.loads(self.config.read())
+        config = self.configuration
         config['rootfs']['diff_ids'] = [
             digests[digest]
             for digest in config['rootfs']['diff_ids']
@@ -498,7 +518,12 @@ class ImageManifest:
             print("finished.")
         print("Writing manifest to image destination.")
         data = json.dumps(manifest).encode()
-        hub.post_manifest(data)
+        try:
+            hub.post_manifest(data)
+        except Exception as e:
+            print(e.response.headers)
+            print(e.response.content)
+            raise
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
         print(f"{len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
@@ -506,5 +531,9 @@ class ImageManifest:
         if notary is not None:
             hashes = generate_hashes(data)
             notary.add_target_hashes(store.url.tag, hashes)
-            notary.publish(root_certificate)
+            try:
+                notary.publish(root_certificate)
+            except Exception as e:
+                print(e.response.headers)
+                print(e.response.text)
 

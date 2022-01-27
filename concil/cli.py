@@ -40,10 +40,54 @@ def resolve_digests(digests, short_digests):
                 
 
 def do_list(args):
+    import json, shlex
     image = ImageManifest.from_path(args.image)
+    configuration = image.configuration
+    for key in ['Created', 'Author', 'Architecture', 'OS', 'Variant']:
+        if key.lower() in configuration:
+            print(f"{key}: {configuration[key.lower()]}")
+
+    print()
     print(f"{'Digest':65s} {'Size':12s} Media-Type")
     for layer in image.layers:
         print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type}")
+
+    if args.config:
+        print()
+        print("Configuration:")
+        config = configuration['config']
+        if 'Entrypoint' in config:
+            print(f"Entrypoint: {' '.join(map(shlex.quote, config['Entrypoint']))}")
+        if 'Cmd' in config:
+            print(f"Cmd: {' '.join(map(shlex.quote, config['Cmd']))}")
+        for key in ['User', 'ExposedPorts', 'WorkingDir', 'Labels', 'StopSignal']:
+            if key in config:
+                print(f"{key}: {config[key]}")
+        if "Env" in config:
+            print()
+            print("Environment:")
+            for env in config["Env"]:
+                print(env)
+        if "Volumes" in config:
+            print()
+            print("Volumes:")
+            for volume in config["Volumes"]:
+                print(f"- {volume}")
+
+    if args.history:
+        print()
+        print("History:")
+        for history in configuration['history']:
+            print()
+            if 'created' in history:
+                print(f"Date: {history['created']}")
+            if 'author' in history:
+                print(f"Author: {history['author']}")
+            if 'comment' in history:
+                print(f"Comment: {history['comment']}")
+            if 'created_by' in history:
+                print(history['created_by'])
+
 
 def do_copy(args):
     keys = []
@@ -107,6 +151,29 @@ def do_copy(args):
             layer.convert("squashfs")
     for layer in image.layers:
         layer.encryption_keys = keys
+    config = image.configuration['config']
+    if args.env:
+        print(args.env)
+        env = dict(kv.split('=',1) for env in args.env for kv in env)
+        environment = []
+        if "Env" in config:
+            for kv in config["Env"]:
+                k, v = kv.split('=', 1)
+                if k in env:
+                    v = env.pop(k)
+                    kv = f"{k}={v}"
+                if v:
+                    environment.append(kv)
+        for k, v in env.items():
+            environment.append(f"{k}={v}")
+        config["Env"] = environment
+    if args.volumes:
+        config["Volume"] = {v:{} for vols in args.volumes for v in vols}
+    if args.entrypoint is not None:
+        import shlex
+        config["Entrypoint"] = shlex.split(args.entrypoint)
+    if args.working_dir is not None:
+        config["WorkingDir"] = args.working_dir
     image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
 
 def do_publish(args):
@@ -115,11 +182,13 @@ def do_publish(args):
 
 def main():
     warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
-    store.TAR2SQFS = ["tar2sqfs", "-c", "zstd", "-X", "level=19"]
+    store.TAR2SQFS[-1] = "level=19"
     parser = argparse.ArgumentParser(description='Convert container images.')
     subparsers = parser.add_subparsers(help='sub-command help', dest='cmd')
     parser_list = subparsers.add_parser('list', help='list layers of image')
     parser_list.add_argument('image', help='image directory')
+    parser_list.add_argument('--config', action='store_true', help='show config')
+    parser_list.add_argument('--history', action='store_true', help='show history')
     
     parser_copy = subparsers.add_parser('copy', help='modify the layers of image')
     parser_copy.add_argument('source-image', help='source directory')
@@ -131,10 +200,21 @@ def main():
     parser_copy.add_argument('--remove-layer', metavar="layer", nargs="+", action='append',
         help='ID of layers to remove')
     parser_copy.add_argument('--add-layer', metavar="layer", nargs="+", action='append',
+<<<<<<< Updated upstream
+        help='filename of new layers appended')
+    parser_copy.add_argument('--merge-layers', metavar="layers", nargs="+", action='append',
+=======
+>>>>>>> Stashed changes
         help='filename of new layers appended')
     parser_copy.add_argument('--merge-layers', metavar="layers", nargs="+", action='append',
         help='filename of new layers appended')
-
+    parser_copy.add_argument('--env', metavar="env", nargs="+", action='append',
+        help='updates the environment: Key=Value')
+    parser_copy.add_argument('--volumes', metavar="volumes", nargs="+", action='append',
+        help='list of volumes')
+    parser_copy.add_argument('--entrypoint', action='store', help='sets the entrypoint')
+    parser_copy.add_argument('--working-dir', action='store', help='sets the working dir')
+#
     parser_publish = subparsers.add_parser('publish', help='publish image to docker hub')
     parser_publish.add_argument('--root-certificate', action='store', help='root certificate')
     parser_publish.add_argument('image', help='image directory')
@@ -148,7 +228,7 @@ def main():
     elif args.cmd == 'publish':
         do_publish(args)
     else:
-        raise RuntimeError()
+        parser.print_help()
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,12 @@ import urllib
 import requests
 import base64
 import getpass
-from jwcrypto.common import base64url_decode, base64url_encode
+
+def base64url_encode(payload):
+    if not isinstance(payload, bytes):
+        payload = payload.encode('utf-8')
+    encode = base64.urlsafe_b64encode(payload)
+    return encode.decode('utf-8') #.rstrip('=') Harbor don't like stripped base64
 
 class DockerSplitResult(urllib.parse.SplitResult):
     __slots__ = ()
@@ -37,27 +42,29 @@ def parse_docker_url(docker_url):
 class DockerHub(object):
     def __init__(self, docker_url, verify=None):
         parts = parse_docker_url(docker_url)
-        self.username = parts.username
-        self.password = parts.password        
+        self.username = urllib.parse.unquote_plus(parts.username) if parts.username else None
+        self.password = urllib.parse.unquote_plus(parts.password) if parts.password else None
         self.repository = parts.repository
         self.url = parts.url
         self.tag = parts.tag
         self.session = requests.Session()
         self.session.proxies = {"https": ""}
         self.session.verify = verify
+        self.session.headers['Docker-Distribution-Api-Version'] = 'registry/2.0'
 
     def check_login(self, response):
         if response.status_code != 401:
             return True
+        print(response.headers)
         self.session.headers.pop("authorization", None)
         www_authenticate = response.headers['Www-Authenticate']
         if not www_authenticate.startswith('Bearer'):
             raise RuntimeError()
         params = dict(re.findall('([a-z]+)="([^"]*)"', www_authenticate))
         if not self.username:
-            self.username = urllib.parse.quote_plus(input("Username for storage:"))
+            self.username = input("Username for storage:")
         if not self.password:
-            self.password = urllib.parse.quote_plus(getpass.getpass("Password for storage:"))
+            self.password = getpass.getpass("Password for storage:")
         auth = '%s:%s' % (self.username, self.password)
         auth = base64url_encode(auth)
         realm = params.pop('realm')
@@ -71,9 +78,12 @@ class DockerHub(object):
         return False
     
     def request(self, method, url, **kw):
+        print(url)
         response = self.session.request(method, url, **kw)
+        print(response.headers)
         if not self.check_login(response):
             response = self.session.request(method, url, **kw)
+            print(response.headers)
         response.raise_for_status()
         return response
 

@@ -14,12 +14,12 @@ from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography.hazmat.primitives.serialization import load_der_public_key, load_der_private_key, Encoding, PublicFormat, PrivateFormat, BestAvailableEncryption
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID, SignatureAlgorithmOID
 from cryptography import x509
 from .dockerhub import DockerHub
 import requests
 import logging
+from collections import OrderedDict
 logger = logging.getLogger(__name__)
 
 def verify_cert(cert, public_key):
@@ -264,6 +264,7 @@ def load_key(key):
         cert = x509.load_pem_x509_certificate(data, backend=default_backend())
         return cert.public_key()
     elif key['keytype'] == 'ed25519':
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
         return Ed25519PublicKey.from_public_bytes(data)
     else:
         return load_der_public_key(data, backend=default_backend())
@@ -332,7 +333,7 @@ class Metafile(object):
 
     def to_bytes(self, private_keys):
         self.data['signed']['expires'] = (datetime.datetime.utcnow() + datetime.timedelta(seconds=self.EXPIRATION_DELAY)).isoformat() + 'Z'
-        self.data['signed']['version'] = self.data['signed'].get('version', 0) + 1
+        self.data['signed']['version'] = self.data['signed'].get('version', 0) + 1 #if self.name == "root" else 17)
         self.bytes = encode_signed_json(private_keys, self.data['signed'])
         return self.bytes
 
@@ -389,6 +390,7 @@ class Root(Metafile):
                         key_ids = ids
             if key_ids is not None:
                 root_keys = self.get_keys('root')
+                print(root_keys, key_ids)
                 for key_id in key_ids:
                     if key_id in root_keys:
                         bytes = encode_json(root_keys[key_id])
@@ -478,6 +480,7 @@ class JsonStore(object):
     def get(self, metafileclass, hashes=None, name=None):
         type = name or metafileclass.name
         filename = self.path / f"{type}.json"
+        print(filename)
         if hashes is not None:
             # look into cache
             try:
@@ -528,10 +531,11 @@ class JsonStore(object):
         return self._hub.request('GET', url).json()
     
     def publish(self, datas):
-        upload_files = {}
-        for data in datas:
+        upload_files = OrderedDict()
+        for data in sorted(datas, key=lambda d:d.name):
             upload_files[data.name] = (data.name, data.bytes, 'application/octet-stream')
         url = f"{self._hub.url}/_trust/tuf/"
+        print(upload_files)
         return self._hub.request('POST', url, files=upload_files)
 
 

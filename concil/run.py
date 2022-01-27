@@ -107,7 +107,16 @@ def sq_mount(layers, mount_path):
         time.sleep(0.01)
 
 def mount_volumes(mount_point, layers, volumes):
+    #mount_point2 = get_mount_point()
+    #mount_point3 = '/home/yy'
     sq_mount(layers, mount_point)
+    #process = subprocess.Popen([
+    #    os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
+    #        "-f", "-o", "lowerdir={layers},upperdir={upper_path},workdir={work_path}".format(
+    #            layers=':'.join([mount_point2]), upper_path='/home/xx', work_path=mount_point3),
+    #    mount_point
+    #])
+    #time.sleep(3)
     for source_path, mount_path, flags in volumes:
         mount_dir(mount_point, source_path, mount_path, None, flags | MS_BIND | MS_REC)
 
@@ -122,6 +131,8 @@ def mount_std_volumes(mount_point):
 
 class Config:
     def __init__(self, manifest_filename, private_key=None):
+        if os.path.isdir(manifest_filename):
+            manifest_filename = os.path.join(manifest_filename, 'manifest.json')
         self.basepath = os.path.dirname(manifest_filename)
         self.private_key = private_key
         with open(manifest_filename, 'r', encoding='utf8') as file:
@@ -130,6 +141,7 @@ class Config:
         with open(config_filename, 'r', encoding='utf8') as file:
             self.image_config = json.load(file)
         self.config = self.image_config.get('config', {})
+        self.check_volumes = True
 
     def get_environment(self):
         # remove all LD_-Variables like LD_LIBRARY_PATH or LD_PRELOAD
@@ -207,7 +219,7 @@ class Config:
             mount_path, _, flags = other.partition(':')
             flags = MS_RDONLY if 'ro' in flags.split(',') else 0
             mount_path = mount_path.strip('/')
-            if '/' + mount_path not in defined_volumes:
+            if self.check_volumes and '/' + mount_path not in defined_volumes:
                 raise RuntimeError("mount volume not defined")
             source_path = os.path.abspath(source_path)
             result.append((source_path, mount_path, flags))

@@ -108,6 +108,23 @@ class Store:
                 notary_url = info.get('notary')
         if registry_url is None:
             registry_url = unsplit_url("https", url.netloc)
+            
+        if not url.username and "auths" in config:
+            repository = f"{url.hostname}{url.path}"
+            auths = config["auths"]
+            if repository in auths:
+                auth = auths[repository]
+            else:
+                auth = None
+                longest = 0
+                for repo, repo_auth in auths.items():
+                    if repo.endswith('*') and len(repo) > longest and repository.startswith(repo[:-1]):
+                        longest = len(repo)
+                        auth = repo_auth
+            if auth is not None:
+                auth = urllib.parse.quote_plus(auth, safe=':')
+                url = url._replace(netloc=f'{auth}@{url.netloc}')
+            
         registry_url = parse_docker_url(registry_url)
         full_url = unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
         logger.debug("full registry url: %s", full_url)
@@ -159,13 +176,16 @@ class Store:
         return bytes
 
     def get_manifest(self, architecture=None, operating_system=None):
-        targets = self._notary.targets.data['signed']['targets']
-        try:
-            target = targets[self.url.tag]
-        except KeyError:
-            logger.warning("tag not found %s", self.url.tag)
-            import sys;sys.exit(9)
-        logger.debug("notary target for %s: %r", self.url.tag, target)
+        if self._notary is None:
+            target = None
+        else:
+            targets = self._notary.targets.data['signed']['targets']
+            try:
+                target = targets[self.url.tag]
+            except KeyError:
+                logger.warning("tag not found %s", self.url.tag)
+                import sys;sys.exit(9)
+            logger.debug("notary target for %s: %r", self.url.tag, target)
         if not target:
             manifest = self._hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
         else:
