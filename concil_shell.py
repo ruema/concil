@@ -38,16 +38,20 @@ def main():
     else:
         logging.basicConfig(level=logging.WARNING)
     
-    filename = args[0]
     volumes = []
+    private_key = None
+    overlay_work_dir = None
+    filename = args[0]
     args = args[1:]
-    if args and args[0] == '-p':
-        private_key = args[1]
-        args = args[2:]
-    else:
-        private_key = None
-    while args and args[0] == '-v':
-        volumes.append(args[1])
+    while args:
+        if args[0] == '-p':
+            private_key = args[1]
+        elif args[0] == '-o':
+            overlay_work_dir = args[1]
+        elif args[0] == '-v':
+            volumes.append(args[1])
+        else:
+            break
         args = args[2:]
     if args and args[0] == '--':
         args = args[1:]
@@ -70,7 +74,7 @@ def main():
     config.config['Entrypoint'] = ['/bin/bash']
     config.config['Cmd'] = []
     config.check_volumes = False
-    sys.exit(run(config, args, volumes))
+    sys.exit(run(config, args, volumes, overlay_work_dir))
 
 if __name__ == '__main__':
     main()

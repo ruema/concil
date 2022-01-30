@@ -98,25 +98,34 @@ def mount_dir(mount_point, source, target, type, options):
         if errno != 22:
             raise RuntimeError("Mounting %s failed (%s)\n" % (target, errno))
 
+def wait_for_file(filename):
+    while not os.path.exists(filename):
+        time.sleep(0.01)
+
 def sq_mount(layers, mount_path):
     """mount a squash image"""
     args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_path.encode()]
     args = (ctypes.c_char_p * len(args))(*args)
     threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
-    while not os.path.exists(os.path.join(mount_path, 'bin')):
-        time.sleep(0.01)
+    wait_for_file(os.path.join(mount_path, 'bin'))
 
-def mount_volumes(mount_point, layers, volumes):
-    #mount_point2 = get_mount_point()
-    #mount_point3 = '/home/yy'
-    sq_mount(layers, mount_point)
-    #process = subprocess.Popen([
-    #    os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
-    #        "-f", "-o", "lowerdir={layers},upperdir={upper_path},workdir={work_path}".format(
-    #            layers=':'.join([mount_point2]), upper_path='/home/xx', work_path=mount_point3),
-    #    mount_point
-    #])
-    #time.sleep(3)
+def mount_volumes(mount_point, layers, volumes, overlay_work_dir=None):
+    if overlay_work_dir is None:
+        sq_mount(layers, mount_point)
+    else:
+        mount_point2 = get_mount_point()
+        root = os.path.join(overlay_work_dir, 'root')
+        os.makedirs(root, exist_ok=True)
+        work = os.path.join(overlay_work_dir, 'work')
+        os.makedirs(work, exist_ok=True)
+        sq_mount(layers, mount_point2)
+        subprocess.Popen([
+            os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
+                "-f", "-o", "lowerdir={layers},upperdir={upper_path},workdir={work_path}".format(
+                    layers=':'.join([mount_point2]), upper_path=root, work_path=work),
+            mount_point
+        ])
+        wait_for_file(os.path.join(mount_point, 'bin'))
     for source_path, mount_path, flags in volumes:
         mount_dir(mount_point, source_path, mount_path, None, flags | MS_BIND | MS_REC)
 
@@ -125,7 +134,7 @@ def mount_std_volumes(mount_point):
     mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
     mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
-    mount_dir(mount_point, "/home/y1rmk/temp/udo/concil/3/concil-1.0.0-beta.1/hosts", "etc/hosts", None, MS_BIND | MS_REC)
+    mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
 
 
@@ -226,9 +235,9 @@ class Config:
         return result
     
 
-def run_child(config, args=None, volumes=None):
+def run_child(config, args=None, volumes=None, overlay_work_dir=None):
     mount_point = get_mount_point()
-    mount_volumes(mount_point, config.get_layers(), config.parse_volumes(volumes))
+    mount_volumes(mount_point, config.get_layers(), config.parse_volumes(volumes), overlay_work_dir)
     pid = clone(True)
     if pid == 0:
         mount_std_volumes(mount_point)
@@ -247,14 +256,14 @@ def run_child(config, args=None, volumes=None):
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
 
-def run(config, args=None, volumes=None):
+def run(config, args=None, volumes=None, overlay_work_dir=None):
     if "architecture" in config.image_config and config.image_config["architecture"] != PLATFORMS[platform.machine()]:
         raise RuntimeError("unsupported architecture")
     if "os" in config.image_config and config.image_config["os"] != platform.system().lower():
         raise RuntimeError("unsupported os")
     pid = clone()
     if pid == 0:
-        status = run_child(config, args, volumes)
+        status = run_child(config, args, volumes, overlay_work_dir)
         os._exit(status)
     pid, status = os.waitpid(pid, 0)
     if status & 0xff:
