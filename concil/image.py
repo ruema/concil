@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 from jwcrypto import jwk, jwe
 from jwcrypto.common import base64url_decode, base64url_encode
 from .store import IMAGE_CONVERTERS
+from .streams import MergedTarStream, GZipStream, DirTarStream
 from .dockerhub import DockerHub
 
 class FormatError(Exception):
@@ -23,20 +24,11 @@ class FormatError(Exception):
 def encode_base64(bytes):
     return base64.encodebytes(bytes).strip().decode('ASCII')
 
-def calculate_digest(filename):
+def calculate_digest(filename, unzip=False):
     hash = sha256()
     with filename.open('rb') as input:
-        while True:
-            data = input.read(1024*1024)
-            if not data:
-                break
-            hash.update(data)
-    digest = hash.hexdigest()
-    return f"sha256:{digest}"
-
-def calculate_gziped_digest(filename):
-    hash = sha256()
-    with gzip.open(filename, 'rb') as input:
+        if unzip:
+            input = gzip.open(filename, 'rb')
         while True:
             data = input.read(1024*1024)
             if not data:
@@ -88,97 +80,6 @@ def encrypt(input_stream, encrypted_filename):
         "cipheroptions": {"nonce": encode_base64(nonce)}
     }
     return pub_data, payload, sha_hash_encrypted
-
-
-class _Stream:
-    def __init__(self):
-        self.buf = b""
-        self.pos = 0
-        self.closed = False
-
-    def tell(self):
-        return self.pos
-
-    def write(self, buf):
-        self.buf += buf
-
-    def close(self):
-        self.closed = True
-
-class MergedIO:
-    def __init__(self, fileobjects):
-        self.stream = _Stream()
-        self.processor = self.process(fileobjects)
-
-    def process(self, fileobjects):
-        from tarfile import TarFile, BLOCKSIZE
-        seen = set()
-        output = TarFile.open(fileobj=self.stream, mode="w:")
-        for fileobject in fileobjects:
-            tarfile = TarFile.open(fileobj=fileobject, mode="r|")
-            for info in tarfile:
-                output.addfile(info)
-                yield
-                if info.sparse is not None:
-                    size = sum(size for offset, size in info.sparse)
-                else:
-                    size = info.size
-                blocks = (size + BLOCKSIZE - 1) // BLOCKSIZE
-                while blocks > 0:
-                    cnt = 32 if blocks > 32 else blocks
-                    buf = tarfile.fileobj.read(cnt * BLOCKSIZE)
-                    output.fileobj.write(buf)
-                    yield
-                    blocks -= cnt
-        output.close()
-        self.stream.close()
-        yield
-
-        
-    def read(self, length):
-        while len(self.stream.buf) < length:
-            if self.stream.closed:
-                break
-            next(self.processor)
-        buf = self.stream.buf
-        result = buf[:length]
-        self.stream.buf = buf[length:]
-        return result
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, *args):
-        return
-
-
-class ZipStream:
-    def __init__(self, input_stream):
-        self.input_stream = input_stream
-        self.buffer = b''
-        self.finished = False
-        self.gzipper = gzip.open(self, 'wb')
-
-    def write(self, data):
-        self.buffer += data
-        
-    def read(self, length):
-        while not self.finished and len(self.buffer) < length:
-            buf = self.input_stream.read(10240)
-            if buf:
-                self.gzipper.write(buf)
-            else:
-                self.finished = True
-                self.gzipper.close()
-        buf = self.buffer[:length]
-        self.buffer = self.buffer[length:]
-        return buf
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, *args):
-        return
     
 
 class Descriptor:
@@ -209,7 +110,7 @@ class Descriptor:
             elif self.media_type == 'tar':
                 self._unpacked_digest = self.digest
             elif self.media_type == 'tar+gzip':
-                self._unpacked_digest = calculate_gziped_digest(self.filename)
+                self._unpacked_digest = calculate_digest(self.filename, unzip=True)
             elif self.media_type.endswith('+encrypted'):
                 self._unpacked_digest = self.digest
             elif self.media_type == "dir":
@@ -238,16 +139,7 @@ class Descriptor:
         if self.media_type == 'squashfs':
             raise NotImplementedError()
         if self.media_type == 'dir':
-            import tarfile
-            stream = io.BytesIO()
-            tar = tarfile.open(fileobj=stream, mode="w")
-            def mk_root(info):
-                info.uid = info.gid = 0
-                info.uname = info.gname = "root"
-                return info
-            tar.add(self.filename, arcname='/', filter=mk_root)
-            stream.seek(0)
-            return stream
+            return DirTarStream(self.filename)
         elif self.data:
             stream = io.BytesIO(self.data)
         else:
@@ -281,12 +173,12 @@ class Descriptor:
         media_type = self.converted_media_type or self.media_type
         temporary_file = None
         if merge_with:
-            input_stream = MergedIO([self.as_tar_stream()] + [m.as_tar_stream() for m in merge_with])
+            input_stream = MergedTarStream([self.as_tar_stream()] + [m.as_tar_stream() for m in merge_with])
         else:
             input_stream = self.as_tar_stream()
         if media_type in ['tar+gzip', 'tar']:
             if media_type == 'tar+gzip':
-                input_stream = ZipStream(input_stream)
+                input_stream = GZipStream(input_stream)
             if not self.encryption_keys:
                 print(f"Copy {self.digest} ({self.media_type})")
                 temp_filename = path / "temp"
@@ -491,7 +383,7 @@ class ImageManifest:
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = {
-            "schemaVersion":2,
+            "schemaVersion": 2,
         }
         if manifest_format != self.MANIFEST_OCI_MEDIA_TYPE:
             manifest["mediaType"] = manifest_format

@@ -200,11 +200,6 @@ def main():
     parser_copy.add_argument('--remove-layer', metavar="layer", nargs="+", action='append',
         help='ID of layers to remove')
     parser_copy.add_argument('--add-layer', metavar="layer", nargs="+", action='append',
-<<<<<<< Updated upstream
-        help='filename of new layers appended')
-    parser_copy.add_argument('--merge-layers', metavar="layers", nargs="+", action='append',
-=======
->>>>>>> Stashed changes
         help='filename of new layers appended')
     parser_copy.add_argument('--merge-layers', metavar="layers", nargs="+", action='append',
         help='filename of new layers appended')
