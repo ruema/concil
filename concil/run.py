@@ -102,40 +102,41 @@ def wait_for_file(filename):
     while not os.path.exists(filename):
         time.sleep(0.01)
 
-def sq_mount(layers, mount_path):
+def mount_root(layers):
     """mount a squash image"""
-    args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_path.encode()]
+    mount_point = get_mount_point()
+    args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_point.encode()]
     args = (ctypes.c_char_p * len(args))(*args)
     threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
-    wait_for_file(os.path.join(mount_path, 'bin'))
+    wait_for_file(os.path.join(mount_point, 'bin'))
+    return mount_point
 
-def mount_volumes(mount_point, layers, volumes, overlay_work_dir=None):
-    if overlay_work_dir is None:
-        sq_mount(layers, mount_point)
-    else:
-        mount_point2 = get_mount_point()
-        root = os.path.join(overlay_work_dir, 'root')
-        os.makedirs(root, exist_ok=True)
-        work = os.path.join(overlay_work_dir, 'work')
-        os.makedirs(work, exist_ok=True)
-        sq_mount(layers, mount_point2)
-        subprocess.Popen([
-            os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
-                "-f", "-o", "lowerdir={layers},upperdir={upper_path},workdir={work_path}".format(
-                    layers=':'.join([mount_point2]), upper_path=root, work_path=work),
-            mount_point
-        ])
-        wait_for_file(os.path.join(mount_point, 'bin'))
+def mount_overlay(overlay_work_dir, mount_point_root):
+    mount_point = get_mount_point()
+    root = os.path.join(overlay_work_dir, 'root')
+    os.makedirs(root, exist_ok=True)
+    work = os.path.join(overlay_work_dir, 'work')
+    os.makedirs(work, exist_ok=True)
+    overlay_process = subprocess.Popen([
+        os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
+        "-f", "-o",
+        f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
+        mount_point
+    ])
+    wait_for_file(os.path.join(mount_point, 'bin'))
+    return mount_point, overlay_process
+
+def mount_volumes(mount_point, cwd, volumes):
     for source_path, mount_path, flags in volumes:
-        mount_dir(mount_point, source_path, mount_path, None, flags | MS_BIND | MS_REC)
+        mount_dir(mount_point, os.path.abspath(os.path.join(cwd, source_path)), mount_path, None, flags | MS_BIND | MS_REC)
 
 def mount_std_volumes(mount_point):
     mount_dir(mount_point, "proc", "proc", "proc", 0)
     mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
     mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
-    mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
-    mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
+    #mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
+    #mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
 
 
 class Config:
@@ -236,8 +237,12 @@ class Config:
     
 
 def run_child(config, args=None, volumes=None, overlay_work_dir=None):
-    mount_point = get_mount_point()
-    mount_volumes(mount_point, config.get_layers(), config.parse_volumes(volumes), overlay_work_dir)
+    cwd = os.getcwd()
+    mount_point = mount_root(config.get_layers())
+    if overlay_work_dir:
+        mount_point2 = mount_point
+        mount_point, overlay_process = mount_overlay(os.path.abspath(os.path.join(cwd, overlay_work_dir)), mount_point2)
+    mount_volumes(mount_point, cwd, config.parse_volumes(volumes))
     pid = clone(True)
     if pid == 0:
         mount_std_volumes(mount_point)
@@ -246,12 +251,15 @@ def run_child(config, args=None, volumes=None, overlay_work_dir=None):
         if libc.chroot(mount_point.encode()):
             raise RuntimeError("chroot failed: %s" % ctypes.get_errno())
         os.chdir(config.working_dir)
-        # commandline = ["/bin/sh"]
         os.execve(commandline[0], commandline, environment)
         raise RuntimeError("exec failed: %s" % ctypes.get_errno())
     pid, status = os.waitpid(pid, 0)
     unmount(mount_point)
     os.rmdir(mount_point)
+    if overlay_work_dir:
+        overlay_process.wait()
+        unmount(mount_point2)
+        os.rmdir(mount_point2)
     if status & 0xff:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
