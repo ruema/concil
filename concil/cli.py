@@ -16,25 +16,65 @@ def generate_key(outputfilename, password):
     with open(outputfilename + '.pem', 'wb') as output:
         output.write(key.export_to_pem())
 
+def find_digest(digests, short_digest):
+    """ Looks up a short digest in the list of digests.
+
+    A digest has only to be given with it's first digits.
+    This function checks if the short digests exists and
+    is unambiguous.
+
+    Args:
+        digests (list): list of digests
+        short_digest (str): the first digits of a digest
+    
+    Returns:
+        None if digest is not found or is ambiguous.
+        Otherwise a strings with the full digest.
+    """
+    found = [d for d in digests if d.startswith(short_digest)]
+    if len(found) != 1:
+        if not found:
+            print(f"{short_digest} not found!")
+        else:
+            print(f"{short_digest} ambiguous: {', '.join(found)}!")
+        return None
+    return found[0]
+
+def resolve_one_digest(digests, short_digest):
+    """ resolves a single short digests or a range of digests
+    to a list of full digests"""
+    start_digest, sep, stop_digest = short_digest.partition('..')
+    if start_digest:
+        start_digest = find_digest(digests, start_digest)
+    if stop_digest:
+        stop_digest = find_digest(digests, stop_digest)
+    if start_digest is None or stop_digest is None:
+        # an error was found
+        return None
+    if sep:
+        # range of digests
+        start_index = digests.index(start_digest) if start_digest else None
+        stop_index = digests.index(stop_digest) + 1 if stop_digest else None
+        return digests[start_index : stop_index]
+    else:
+        return [start_digest]
+
 
 def resolve_digests(digests, short_digests):
     """ resolves a list of short_digests into full digests
-    returns the list of list of digests and a error flag
+    returns the list of list of digests and an error flag
     """
+    digests = list(digests)
     result = []
     error = False
     for inner_short_digests in (short_digests or []):
         inner_result = []
         for short_digest in inner_short_digests:
-            found = [d for d in digests if d.startswith(short_digest)]
-            if len(found) != 1:
-                if not found:
-                    print(f"{short_digest} not found!")
-                else:
-                    print(f"{short_digest} amigous: {', '.join(found)}!")
+            resolved = resolve_one_digest(digests, short_digest)
+            if resolved is None:
                 error = True
             else:
-                inner_result.append(found[0])
+                inner_result.extend(resolved)
         result.append(inner_result)
     return result, error
                 
