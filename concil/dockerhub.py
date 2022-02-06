@@ -39,6 +39,56 @@ class DockerSplitResult(urllib.parse.SplitResult):
 def parse_docker_url(docker_url):
     return DockerSplitResult(*urllib.parse.urlsplit(docker_url))
 
+
+class ResponseStream(object):
+    def __init__(self, response):
+        self._response = response
+        self._iterator = response.iter_content(65536)
+        self._buf = b""
+
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        self._response.close()
+
+    def read(self, size=None):
+        if size is None:
+            result = [self._buf]
+            result.extend(self._iterator)
+            return b"".join(result)
+        else:
+            result = self._buf
+            while len(result) < size:
+                try:
+                    result += next(self._iterator)
+                except StopIteration:
+                    break
+            self._buf = result[size:]
+            return result[:size]
+
+
+class DockerPath(object):
+    def __init__(self, hub, digest=None):
+        self.hub = hub
+        self.digest = digest
+    
+    def __truediv__(self, digest):
+        return DockerPath(self.hub, digest)
+
+    def read_bytes(self):
+        with self.hub.open_blob('sha256:' + self.digest) as file:
+            return file.content
+
+    def open(self, mode='rb'):
+        if mode != 'rb':
+            raise ValueError("mode have to be 'rb'")
+        return ResponseStream(self.hub.open_blob('sha256:' + self.digest))
+
+
 class DockerHub(object):
     def __init__(self, docker_url, verify=None):
         parts = parse_docker_url(docker_url)

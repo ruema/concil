@@ -15,7 +15,7 @@ from jwcrypto import jwk, jwe
 from jwcrypto.common import base64url_decode, base64url_encode
 from .store import IMAGE_CONVERTERS
 from .streams import MergedTarStream, GZipStream, DirTarStream
-from .dockerhub import DockerHub
+from .dockerhub import DockerHub, DockerPath
 
 class FormatError(Exception):
     pass
@@ -28,7 +28,7 @@ def calculate_digest(filename, unzip=False):
     hash = sha256()
     with filename.open('rb') as input:
         if unzip:
-            input = gzip.open(filename, 'rb')
+            input = gzip.open(input, 'rb')
         while True:
             data = input.read(1024*1024)
             if not data:
@@ -83,13 +83,14 @@ def encrypt(input_stream, encrypted_filename):
     
 
 class Descriptor:
-    def __init__(self, filename, media_type, digest, annotations=None):
+    def __init__(self, filename, media_type, digest, annotations=None, size=None):
         self.filename = filename
         self.media_type = media_type
         if digest is None:
             digest = "dir:%s" % filename if media_type == "dir" else calculate_digest(filename)
         self.digest = digest
         self._unpacked_digest = None
+        self._size = size
         self.data = None
         self.annotations = annotations if annotations is not None else {}
         self.converted_media_type = "tar+gzip" if media_type == "dir" else None
@@ -100,6 +101,8 @@ class Descriptor:
     def size(self):
         if self.data:
             return len(self.data)
+        if self._size is not None:
+            return self._size
         return self.filename.stat().st_size
 
     @property
@@ -285,24 +288,31 @@ class ImageManifest:
         media_type = cls._REVERSED_MEDIA_TYPES.get(media_type, media_type)
         digest = meta['digest']
         annotations = meta.get('annotations', {})
+        size = meta.get('size')
         filename = path / digest.split(':', 1)[1]
-        return Descriptor(filename, media_type, digest, annotations)
+        return Descriptor(filename, media_type, digest, annotations, size)
 
     @classmethod
     def from_path(cls, path):
-        path = Path(path)
-        if (path / "index.json").exists():
-            with (path / "index.json").open('rb') as index:
-                index = json.load(index)
-            manifests = index.get('manifests', [])
-            if len(manifests) != 1:
-                raise RuntimeError("unsupported")
-            manifest_file = Path(path, "blobs", *manifests[0]['digest'].split(':'))
-            path = manifest_file.parent
+        if path.startswith('docker://'):
+            hub = DockerHub(path)
+            manifest = hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
+            manifest = json.loads(manifest)
+            path = DockerPath(hub)
         else:
-            manifest_file = path / "manifest.json"
-        with manifest_file.open('rb') as manifest:
-            manifest = json.load(manifest)
+            path = Path(path)
+            if (path / "index.json").exists():
+                with (path / "index.json").open('rb') as index:
+                    index = json.load(index)
+                manifests = index.get('manifests', [])
+                if len(manifests) != 1:
+                    raise RuntimeError("unsupported")
+                manifest_file = Path(path, "blobs", *manifests[0]['digest'].split(':'))
+                path = manifest_file.parent
+            else:
+                manifest_file = path / "manifest.json"
+            with manifest_file.open('rb') as manifest:
+                manifest = json.load(manifest)
         if manifest.get("schemaVersion") != 2:
             raise FormatError("unkown schema version")
         media_type = manifest.get("mediaType", cls.MANIFEST_OCI_MEDIA_TYPE)
@@ -341,7 +351,6 @@ class ImageManifest:
         new_diffs = []
         digests = {}
         for layer in self.layers:
-            digest = layer.unpacked_digest
             if layer.status == 'remove':
                 new_digest = None
             else:
@@ -353,6 +362,7 @@ class ImageManifest:
                 export_layers.append(exported)
                 if layer.status == 'new':
                     new_diffs.append(new_digest)
+            digest = layer.unpacked_digest
             digests[digest] = new_digest
         config = self.configuration
         config['rootfs']['diff_ids'] = [
