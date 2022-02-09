@@ -196,7 +196,7 @@ class Descriptor:
             convert = IMAGE_CONVERTERS.get('tar')
             if convert is None:
                 raise NotImplementedError()
-            squash_filename = path / f"{self.digest}.sq"
+            squash_filename = path / f"temporary.sq"
             diff_digest = convert(input_stream, squash_filename)
             self._unpacked_digest = f"sha256:{diff_digest}"
             if not self.encryption_keys:
@@ -351,6 +351,7 @@ class ImageManifest:
         new_diffs = []
         digests = {}
         for layer in self.layers:
+            digest = layer.unpacked_digest
             if layer.status == 'remove':
                 new_digest = None
             else:
@@ -362,7 +363,6 @@ class ImageManifest:
                 export_layers.append(exported)
                 if layer.status == 'new':
                     new_diffs.append(new_digest)
-            digest = layer.unpacked_digest
             digests[digest] = new_digest
         config = self.configuration
         config['rootfs']['diff_ids'] = [

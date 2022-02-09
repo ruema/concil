@@ -231,7 +231,6 @@ class Config:
             mount_path = mount_path.strip('/')
             if self.check_volumes and '/' + mount_path not in defined_volumes:
                 raise RuntimeError("mount volume not defined")
-            source_path = os.path.abspath(source_path)
             result.append((source_path, mount_path, flags))
         return result
     
@@ -251,7 +250,7 @@ def run_child(config, args=None, volumes=None, overlay_work_dir=None):
         if libc.chroot(mount_point.encode()):
             raise RuntimeError("chroot failed: %s" % ctypes.get_errno())
         os.chdir(config.working_dir)
-        os.execve(commandline[0], commandline, environment)
+        os.execvpe(commandline[0], commandline, environment)
         raise RuntimeError("exec failed: %s" % ctypes.get_errno())
     pid, status = os.waitpid(pid, 0)
     unmount(mount_point)
