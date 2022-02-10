@@ -1,3 +1,4 @@
+import sys
 import argparse
 from itertools import chain
 from collections import Counter
@@ -96,19 +97,21 @@ def do_list(args):
         print()
         print("Configuration:")
         config = configuration['config']
-        if 'Entrypoint' in config:
-            print(f"Entrypoint: {' '.join(map(shlex.quote, config['Entrypoint']))}")
-        if 'Cmd' in config:
-            print(f"Cmd: {' '.join(map(shlex.quote, config['Cmd']))}")
+        if config.get('Entrypoint'):
+            entrypoint = ' '.join(map(shlex.quote, config['Entrypoint']))
+            print(f"Entrypoint: {entrypoint}")
+        if config.get('Cmd'):
+            cmd = ' '.join(map(shlex.quote, config['Cmd']))
+            print(f"Cmd: {cmd}")
         for key in ['User', 'ExposedPorts', 'WorkingDir', 'Labels', 'StopSignal']:
             if key in config:
                 print(f"{key}: {config[key]}")
-        if "Env" in config:
+        if config.get("Env"):
             print()
             print("Environment:")
             for env in config["Env"]:
                 print(env)
-        if "Volumes" in config:
+        if config.get("Volumes"):
             print()
             print("Volumes:")
             for volume in config["Volumes"]:
@@ -208,13 +211,21 @@ def do_copy(args):
             environment.append(f"{k}={v}")
         config["Env"] = environment
     if args.volumes:
-        config["Volume"] = {v:{} for vols in args.volumes for v in vols}
+        config["Volumes"] = {v:{} for vols in args.volumes for v in vols}
     if args.entrypoint is not None:
         import shlex
         config["Entrypoint"] = shlex.split(args.entrypoint)
     if args.working_dir is not None:
         config["WorkingDir"] = args.working_dir
     image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
+
+def do_shell(args):
+    from concil.run import Config, run
+    config = Config(args.image)
+    config.config['Entrypoint'] = ['/bin/bash']
+    config.config['Cmd'] = []
+    config.check_volumes = False
+    sys.exit(run(config, args.args, args.volume, args.overlay_dir))
 
 def do_publish(args):
     image = ImageManifest.from_path(args.image)
@@ -249,7 +260,13 @@ def main():
         help='list of volumes')
     parser_copy.add_argument('--entrypoint', action='store', help='sets the entrypoint')
     parser_copy.add_argument('--working-dir', action='store', help='sets the working dir')
-#
+
+    parser_shell = subparsers.add_parser('shell', help='start a shell in the container')
+    parser_shell.add_argument('image', help='image directory')
+    parser_shell.add_argument('--overlay-dir', action='store', help='overlay directory')
+    parser_shell.add_argument('-v', '--volume', action='append', help='volumes')
+    parser_shell.add_argument('args', nargs=argparse.REMAINDER)
+
     parser_publish = subparsers.add_parser('publish', help='publish image to docker hub')
     parser_publish.add_argument('--root-certificate', action='store', help='root certificate')
     parser_publish.add_argument('image', help='image directory')
@@ -260,6 +277,8 @@ def main():
         do_list(args)
     elif args.cmd == 'copy':
         do_copy(args)
+    elif args.cmd == 'shell':
+        do_shell(args)
     elif args.cmd == 'publish':
         do_publish(args)
     else:
