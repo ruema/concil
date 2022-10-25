@@ -389,7 +389,6 @@ class ImageManifest:
 
     def publish(self, docker_url, manifest_format=None, root_certificate=None):
         from .store import Store
-        from .notary import generate_hashes
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = {
@@ -429,13 +428,16 @@ class ImageManifest:
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
         print(f"{len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
-        notary = store._notary
-        if notary is not None:
+        if store._notary is not None:
+            from .notary import generate_hashes
             hashes = generate_hashes(data)
-            notary.add_target_hashes(store.url.tag, hashes)
+            store._notary.add_target_hashes(store.url.tag, hashes)
             try:
-                notary.publish(root_certificate)
+                store._notary.publish(root_certificate)
             except Exception as e:
                 print(e.response.headers)
                 print(e.response.text)
+        if store._cosign is not None:
+            store._cosign.publish(sha256_digest, root_certificate)
+
 

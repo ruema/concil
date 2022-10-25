@@ -77,6 +77,7 @@ class Store:
         "cache_dir" : "~/.concil",
         "cache_timeout": 604800,
         "disable_content_trust": False,
+        "content_trust": "cosign",#"notary",
         "remote_servers": {
             "docker.io": {
                 "registry": "https://registry.hub.docker.com",
@@ -129,9 +130,13 @@ class Store:
         full_url = unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
         logger.debug("full registry url: %s", full_url)
         self._hub = DockerHub(full_url, verify=verify)
+        self._notary = self._cosign = None
         if disable_content_trust:
-            self._notary = None
-        else:
+            pass
+        elif config.get('content_trust', "") == "cosign":
+            from .cosign import Cosign
+            self._cosign = Cosign(self._hub)
+        elif config.get('content_trust', "notary") == "notary":
             if notary_url is None:
                 notary_url = registry_url
                 port = 4443
@@ -147,6 +152,8 @@ class Store:
                 "trust_dir" : self._cache_dir / "notary",
                 "trust_pinning": config.get("trust_pinning", {}),
             }, verify=verify)
+        else:
+            raise RuntimeError("unknown content trust")
 
     def cache_cleanup(self):
         cache_time = time.time() - self._cache_timeout
@@ -198,6 +205,8 @@ class Store:
                 if not check_hashes(manifest, target):
                     raise ValueError("hash check failed")
                 self.store_cache("manifest", manifest, hex_digest)
+        if self._cosign is not None:
+            self._cosign.check_signature(manifest)
         manifest = json.loads(manifest)
         if manifest['mediaType'] == 'application/vnd.docker.distribution.manifest.list.v2+json':
             for entry in manifest['manifests']:

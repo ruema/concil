@@ -154,13 +154,18 @@ class Config:
         self.check_volumes = True
 
     def get_environment(self):
-        # remove all LD_-Variables like LD_LIBRARY_PATH or LD_PRELOAD
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith('LD_') and not key.startswith('CONCIL_')
-        }
-        environment.update(e.split('=', 1) for e in self.config.get('Env', []))
+        """ parses the Env configuration.
+        The environment variables are given in the from VAR=value.
+        If no = is provided, the value is taken from the
+        local environment.
+        """
+        environment = {}
+        for env in self.config.get('Env', []):
+            key, sep, value = env.partition('=')
+            if sep:
+                environment[key] = value
+            else:
+                environment[key] = os.environ.get(key, "")
         return environment
 
     @property

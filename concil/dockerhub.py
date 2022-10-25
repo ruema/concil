@@ -151,10 +151,25 @@ class DockerHub(object):
             raise RuntimeError(response.text)
         return response
 
-    def post_manifest(self, data):
+    def post_blob_data(self, data, digest):
         self.session.cookies.clear()
-        return self.request("PUT", self.url + "/manifests/" + self.tag,
-            headers={"Content-Type": "application/vnd.docker.distribution.manifest.v2+json"},
+        response = self.request("POST", self.url + "/blobs/uploads/")
+        location = response.headers['Location']
+        self.session.cookies.clear()
+        response = self.session.put(location,
+            params={"digest": "sha256:" + digest},
+            headers={"Content-Type": "application/octet-stream"},
+            data=data)
+        if response.status_code != 201:
+            raise RuntimeError(response.text)
+        return response
+
+    def post_manifest(self, data, tag=None, content_type="application/vnd.docker.distribution.manifest.v2+json"):
+        self.session.cookies.clear()
+        if tag is None:
+            tag = self.tag
+        return self.request("PUT", self.url + "/manifests/" + tag,
+            headers={"Content-Type": content_type},
             data=data,
         )
 
