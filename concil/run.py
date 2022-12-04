@@ -52,30 +52,23 @@ def map_id(filename, id_from, id_to):
 
 def clone(re=False):
     """clone this process with new namespaces"""
-    real_euid = os.geteuid()
-    real_egid = os.getegid()
     #pid = os.fork()
     flags = CLONE_NEWPID if re else CLONE_NEWUSER|CLONE_NEWNS
     pid = libc.syscall(CLONE, SIGCHLD | flags, None, None, None, None)
     if pid < 0:
         raise RuntimeError("clone failed %s" % ctypes.get_errno())
-    if pid == 0:
-        #result = libc.unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID)
-        #if result:
-        #    raise RuntimeError("unshare failed %s" % result)
-        if re:
-            pass
-            #map_id(_PATH_PROC_UIDMAP, 1, 0)
-            #map_id(_PATH_PROC_GIDMAP, 1, 0)
-        else:
-            setgroups_control("deny")
-            map_id(_PATH_PROC_UIDMAP, 0, real_euid)
-            map_id(_PATH_PROC_GIDMAP, 0, real_egid)
-        #pid2 = os.fork()
-        #if pid2 != 0:
-        #    os.waitpid(pid2, 0)
-        #    sys.exit(0)
+    # if pid == 0:
+    #    result = libc.unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID)
+    #    if result:
+    #        raise RuntimeError("unshare failed %s" % result)
     return pid
+
+def map_userid(real_euid, real_egid, user_id=0, group_id=0):
+    setgroups_control("deny")
+    map_id(_PATH_PROC_UIDMAP, user_id, real_euid)
+    map_id(_PATH_PROC_GIDMAP, group_id, real_egid)
+    libc.setresuid(user_id, user_id, user_id)
+    libc.setresgid(group_id, group_id, group_id)
 
 def unmount(mount_path):
     """ unmount the mount path"""
@@ -83,12 +76,14 @@ def unmount(mount_path):
         logger.error("unmount failed: %s", ctypes.get_errno())
 
 def get_mount_point():
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
+    try:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        return mkdtemp(prefix='concil.', dir=runtime)
+    except OSError:
         # RUNTIME_DIR not specified
         # fall back to /tmp
         runtime = "/tmp"
-    return mkdtemp(prefix='concil.', dir=runtime)
+        return mkdtemp(prefix='concil.', dir=runtime)
 
 def mount_dir(mount_point, source, target, type, options):
     target_path = os.path.join(mount_point, target)
@@ -135,8 +130,14 @@ def mount_std_volumes(mount_point):
     mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
     mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
     mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
-    #mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
-    #mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
+    try:
+        mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
+    except RuntimeError:
+        pass
+    try:
+        mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
+    except RuntimeError:
+        pass
 
 
 class Config:
@@ -161,12 +162,17 @@ class Config:
         """
         environment = {}
         for env in self.config.get('Env', []):
-            key, sep, value = env.partition('=')
-            if sep:
-                environment[key] = value
-            else:
-                environment[key] = os.environ.get(key, "")
+            key, sep, value = env.partition("=")
+            if not sep:
+                value = os.environ.get(key, "")
+            environment[key] = value
         return environment
+
+    def get_userid(self, etc_path=None):
+        # user, uid, user:group, uid:gid, uid:group, user:gid
+        user = self.config.get('User', "0:0")
+        user, _, group = user.partition(':')
+        return int(user), int(group)
 
     @property
     def working_dir(self):
@@ -240,7 +246,8 @@ class Config:
         return result
     
 
-def run_child(config, args=None, volumes=None, overlay_work_dir=None):
+def run_child(config, args=None, volumes=None, overlay_work_dir=None, real_euid=0, real_egid=0):
+    map_userid(real_euid, real_egid, *config.get_userid()) #os.path.join(mount_point, 'etc')))
     cwd = os.getcwd()
     mount_point = mount_root(config.get_layers())
     if overlay_work_dir:
@@ -273,9 +280,11 @@ def run(config, args=None, volumes=None, overlay_work_dir=None):
         raise RuntimeError("unsupported architecture")
     if "os" in config.image_config and config.image_config["os"] != platform.system().lower():
         raise RuntimeError("unsupported os")
+    real_euid = os.geteuid()
+    real_egid = os.getegid()
     pid = clone()
     if pid == 0:
-        status = run_child(config, args, volumes, overlay_work_dir)
+        status = run_child(config, args, volumes, overlay_work_dir, real_euid, real_egid)
         os._exit(status)
     pid, status = os.waitpid(pid, 0)
     if status & 0xff:
