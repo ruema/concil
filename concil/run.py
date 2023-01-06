@@ -27,6 +27,8 @@ CLONE_NEWPID = 0x20000000
 MS_RDONLY = 1
 MS_BIND = 4096
 MS_REC = 16384
+MS_PRIVATE = 1 << 18
+MS_SHARED = 1 << 20
 
 _PATH_PROC_UIDMAP = "/proc/self/uid_map"
 _PATH_PROC_GIDMAP = "/proc/self/gid_map"
@@ -50,15 +52,14 @@ def map_id(filename, id_from, id_to):
     with open(filename, "w", encoding='ASCII') as fd:
         fd.write("{id_from} {id_to} 1".format(id_from=id_from, id_to=id_to))
 
-def clone(re=False):
+def clone(flags):
     """clone this process with new namespaces"""
-    #pid = os.fork()
-    flags = CLONE_NEWPID if re else CLONE_NEWUSER|CLONE_NEWNS
     pid = libc.syscall(CLONE, SIGCHLD | flags, None, None, None, None)
     if pid < 0:
         raise RuntimeError("clone failed %s" % ctypes.get_errno())
+    # pid = os.fork()
     # if pid == 0:
-    #    result = libc.unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID)
+    #    result = libc.unshare(flags)
     #    if result:
     #        raise RuntimeError("unshare failed %s" % result)
     return pid
@@ -93,21 +94,23 @@ def mount_dir(mount_point, source, target, type, options):
         if errno != 22:
             raise RuntimeError("Mounting %s failed (%s)\n" % (target, errno))
 
-def wait_for_file(filename):
-    while not os.path.exists(filename):
-        time.sleep(0.01)
+def wait_for_device(mount_point, device):
+    for _ in range(1000):
+        if device != os.stat(mount_point).st_dev:
+            return
+        time.sleep(0.001)
+    raise RuntimeError("mount failed")
 
-def mount_root(layers):
+def mount_root(mount_point, layers):
     """mount a squash image"""
-    mount_point = get_mount_point()
+    device = os.stat(mount_point).st_dev
     args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_point.encode()]
     args = (ctypes.c_char_p * len(args))(*args)
     threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
-    wait_for_file(os.path.join(mount_point, 'bin'))
-    return mount_point
+    wait_for_device(mount_point, device)
 
-def mount_overlay(overlay_work_dir, mount_point_root):
-    mount_point = get_mount_point()
+def mount_overlay(mount_point, overlay_work_dir, mount_point_root):
+    device = os.stat(mount_point).st_dev
     root = os.path.join(overlay_work_dir, 'root')
     os.makedirs(root, exist_ok=True)
     work = os.path.join(overlay_work_dir, 'work')
@@ -118,8 +121,8 @@ def mount_overlay(overlay_work_dir, mount_point_root):
         f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
         mount_point
     ])
-    wait_for_file(os.path.join(mount_point, 'bin'))
-    return mount_point, overlay_process
+    wait_for_device(mount_point, device)
+    return overlay_process
 
 def mount_volumes(mount_point, cwd, volumes):
     for source_path, mount_path, flags in volumes:
@@ -246,31 +249,79 @@ class Config:
         return result
     
 
-def run_child(config, args=None, volumes=None, overlay_work_dir=None, real_euid=0, real_egid=0):
-    map_userid(real_euid, real_egid, *config.get_userid()) #os.path.join(mount_point, 'etc')))
+def pivot_root(mount_point):
+    fd_oldroot = os.open('/', 0)
+    os.chdir(mount_point)
+
+    ret = libc.mount(None, b"/", None, MS_PRIVATE | MS_REC, None)
+    if ret < 0:
+        print("mount1")
+        return ret
+    #ret = libc.mount(b".", b".", None, MS_BIND, None)
+
+    # pivot_root into our new root fs
+    ret = libc.pivot_root(".", ".")
+    if ret < 0:
+        print("pivot")
+        return ret
+
+    # At this point the old-root is mounted on top of our new-root. To
+    # unmounted it we must not be chdir'd into it, so escape back to
+    # old-root.
+    ret = libc.fchdir(fd_oldroot)
+    if ret < 0:
+        print("chdir")
+        return ret
+
+    unmount(".")
+    os.chdir("/")
+    # Finally, we turn the rootfs into a shared mount. Note, that this
+    # doesn't reestablish mount propagation with the hosts mount
+    # namespace. Instead we'll create a new peer group.
+    #
+    # We're doing this because most workloads do rely on the rootfs being
+    # a shared mount. For example, systemd daemon like sytemd-udevd run in
+    # their own mount namespace. Their mount namespace has been made a
+    # dependent mount (MS_SLAVE) with the host rootfs as it's dominating
+    # mount. This means new mounts on the host propagate into the
+    # respective services.
+    #
+    # This is broken if we leave the container's rootfs a dependent mount.
+    # In which case both the container's rootfs and the service's rootfs
+    # will be dependent mounts with the host's rootfs as their dominating
+    # mount. So if you were to mount over the rootfs from the host it
+    # would not just propagate into the container's mount namespace it
+    # would also propagate into the service. That's nonsense semantics for
+    # nearly all relevant use-cases. Instead, establish the container's
+    # rootfs as a separate peer group mirroring the behavior on the host.
+    ret = libc.mount(b"", b".", b"", MS_SHARED | MS_REC, None)
+    if ret < 0:
+        print("mount")
+        return ret
+    return 0
+
+def run_child(config, args=None, volumes=None, mount_point=None, mount_point2=None, overlay_work_dir=None):
     cwd = os.getcwd()
-    mount_point = mount_root(config.get_layers())
+    mount_root(mount_point, config.get_layers())
     if overlay_work_dir:
-        mount_point2 = mount_point
-        mount_point, overlay_process = mount_overlay(os.path.abspath(os.path.join(cwd, overlay_work_dir)), mount_point2)
+        overlay_process = mount_overlay(mount_point2, os.path.abspath(os.path.join(cwd, overlay_work_dir)), mount_point)
+        mount_point, mount_point2 = mount_point2, mount_point
     mount_volumes(mount_point, cwd, config.parse_volumes(volumes))
-    pid = clone(True)
+    pid = clone(CLONE_NEWPID|CLONE_NEWNS if overlay_work_dir else CLONE_NEWPID)
     if pid == 0:
         mount_std_volumes(mount_point)
         commandline = config.build_commandline(args)
         environment = config.get_environment()
-        if libc.chroot(mount_point.encode()):
+        #if libc.chroot(mount_point.encode()):
+        if pivot_root(mount_point.encode()):
             raise RuntimeError("chroot failed: %s" % ctypes.get_errno())
         os.chdir(config.working_dir)
         os.execvpe(commandline[0], commandline, environment)
         raise RuntimeError("exec failed: %s" % ctypes.get_errno())
     pid, status = os.waitpid(pid, 0)
-    unmount(mount_point)
-    os.rmdir(mount_point)
     if overlay_work_dir:
+        unmount(mount_point)
         overlay_process.wait()
-        unmount(mount_point2)
-        os.rmdir(mount_point2)
     if status & 0xff:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
@@ -282,11 +333,17 @@ def run(config, args=None, volumes=None, overlay_work_dir=None):
         raise RuntimeError("unsupported os")
     real_euid = os.geteuid()
     real_egid = os.getegid()
-    pid = clone()
+    mount_point = get_mount_point()
+    mount_point2 = get_mount_point() if overlay_work_dir else None
+    pid = clone(CLONE_NEWUSER|CLONE_NEWNS)
     if pid == 0:
-        status = run_child(config, args, volumes, overlay_work_dir, real_euid, real_egid)
+        map_userid(real_euid, real_egid, *config.get_userid())
+        status = run_child(config, args, volumes, mount_point, mount_point2, overlay_work_dir)
         os._exit(status)
     pid, status = os.waitpid(pid, 0)
+    os.rmdir(mount_point)
+    if mount_point2:
+        os.rmdir(mount_point2)
     if status & 0xff:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
