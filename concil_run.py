@@ -39,19 +39,6 @@ def main():
         logging.basicConfig(level=logging.WARNING)
     
     filename = args[0]
-    volumes = []
-    args = args[1:]
-    if args and args[0] == '-p':
-        private_key = args[1]
-        args = args[2:]
-    else:
-        private_key = None
-    while args and args[0] == '-v':
-        volumes.append(args[1])
-        args = args[2:]
-    if args and args[0] == '--':
-        args = args[1:]
-
     if filename.startswith('docker://'):
         parts = parse_docker_url(filename)
         if "@" in parts.netloc:
@@ -64,10 +51,11 @@ def main():
             else:
                 full_url = filename
         store = Store(full_url)
-        config = StoreConfig(store, private_key)
+        config = StoreConfig(store)
     else:
-        config = Config(filename, private_key)
-    sys.exit(run(config, args, volumes))
+        config = Config(filename)
+    config.parse_args(args[1:])
+    sys.exit(run(config))
 
 if __name__ == '__main__':
     main()

@@ -225,7 +225,9 @@ def do_shell(args):
     config.config['Entrypoint'] = ['/bin/bash']
     config.config['Cmd'] = []
     config.check_volumes = False
-    sys.exit(run(config, args.args, args.volume, args.overlay_dir))
+    config.args = args
+    config.volumes = args.volume
+    sys.exit(run(config, args.overlay_dir))
 
 def do_publish(args):
     image = ImageManifest.from_path(args.image)

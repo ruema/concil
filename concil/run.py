@@ -144,11 +144,12 @@ def mount_std_volumes(mount_point):
 
 
 class Config:
-    def __init__(self, manifest_filename, private_key=None):
+    def __init__(self, manifest_filename, private_key=None, environment=None):
         if os.path.isdir(manifest_filename):
             manifest_filename = os.path.join(manifest_filename, 'manifest.json')
         self.basepath = os.path.dirname(manifest_filename)
         self.private_key = private_key
+        self.environment = dict(environment if environment is not None else os.environ)
         with open(manifest_filename, 'r', encoding='utf8') as file:
             self.manifest = json.load(file)
         config_filename = os.path.join(self.basepath, self.manifest['config']['digest'].split(':',1)[1])
@@ -156,6 +157,42 @@ class Config:
             self.image_config = json.load(file)
         self.config = self.image_config.get('config', {})
         self.check_volumes = True
+        self.volumes = []
+        self.args = []
+    
+    def parse_args(self, args):
+        while args:
+            if args[0] in ('-e', '--env'):
+                if len(args) <= 1:
+                    break
+                key, sep, value = args[1].partition('=')
+                if sep:
+                    self.environment[key] = value
+                args = args[2:]
+            elif args[0] == '--env-file':
+                if len(args) <= 1:
+                    break
+                self.environment.update(read_environment_file(args[1]))
+                args = args[2:]
+            elif args[0] in ('-p', '--private-key'):
+                if len(args) <= 1:
+                    break
+                if private_key is not None:
+                    print("only one private-key argument allowed")
+                    return
+                self.private_key = args[1]
+                # --help --mount --tmpfs
+            elif args[0] in ('-v', '--volume'):
+                if len(args) <= 1:
+                    break
+                self.volumes.append(args[1])
+                args = args[2:]
+            elif args[0] == '--':
+                args = args[1:]
+                break
+            else:
+                break
+        self.args = args
 
     def get_environment(self):
         """ parses the Env configuration.
@@ -167,7 +204,7 @@ class Config:
         for env in self.config.get('Env', []):
             key, sep, value = env.partition("=")
             if not sep:
-                value = os.environ.get(key, "")
+                value = self.environment.get(key, "")
             environment[key] = value
         return environment
 
@@ -188,6 +225,8 @@ class Config:
             commandline = entrypoint + commandline
         if args:
             commandline.extend(args)
+        elif self.args:
+            commandline.extend(self.args)
         return commandline
 
     def get_key(self, layer):
@@ -233,12 +272,12 @@ class Config:
             for l in self.image_config['rootfs']['diff_ids']
         ]
 
-    def parse_volumes(self, volumes):
+    def get_volumes(self):
         defined_volumes = self.config.get('Volumes') or {}
-        if not volumes:
+        if not self.volumes:
             return []
         result = []
-        for volume in volumes:
+        for volume in self.volumes:
             source_path, _, other = volume.partition(':')
             mount_path, _, flags = other.partition(':')
             flags = MS_RDONLY if 'ro' in flags.split(',') else 0
@@ -300,17 +339,17 @@ def pivot_root(mount_point):
         return ret
     return 0
 
-def run_child(config, args=None, volumes=None, mount_point=None, mount_point2=None, overlay_work_dir=None):
+def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None):
     cwd = os.getcwd()
     mount_root(mount_point, config.get_layers())
     if overlay_work_dir:
         overlay_process = mount_overlay(mount_point2, os.path.abspath(os.path.join(cwd, overlay_work_dir)), mount_point)
         mount_point, mount_point2 = mount_point2, mount_point
-    mount_volumes(mount_point, cwd, config.parse_volumes(volumes))
+    mount_volumes(mount_point, cwd, config.get_volumes())
     pid = clone(CLONE_NEWPID|CLONE_NEWNS if overlay_work_dir else CLONE_NEWPID)
     if pid == 0:
         mount_std_volumes(mount_point)
-        commandline = config.build_commandline(args)
+        commandline = config.build_commandline()
         environment = config.get_environment()
         #if libc.chroot(mount_point.encode()):
         if pivot_root(mount_point.encode()):
@@ -326,7 +365,7 @@ def run_child(config, args=None, volumes=None, mount_point=None, mount_point2=No
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
 
-def run(config, args=None, volumes=None, overlay_work_dir=None):
+def run(config, overlay_work_dir=None):
     if "architecture" in config.image_config and config.image_config["architecture"] != PLATFORMS[platform.machine()]:
         raise RuntimeError("unsupported architecture")
     if "os" in config.image_config and config.image_config["os"] != platform.system().lower():
@@ -338,7 +377,7 @@ def run(config, args=None, volumes=None, overlay_work_dir=None):
     pid = clone(CLONE_NEWUSER|CLONE_NEWNS)
     if pid == 0:
         map_userid(real_euid, real_egid, *config.get_userid())
-        status = run_child(config, args, volumes, mount_point, mount_point2, overlay_work_dir)
+        status = run_child(config, mount_point, mount_point2, overlay_work_dir)
         os._exit(status)
     pid, status = os.waitpid(pid, 0)
     os.rmdir(mount_point)
@@ -347,26 +386,28 @@ def run(config, args=None, volumes=None, overlay_work_dir=None):
     if status & 0xff:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
-    
+
+
+def read_environment_file(filename):
+    """ reads a file with key=value-pairs.
+    Returns a dict with the values."""
+    result = {}
+    with open(filename) as lines:
+        for line in lines:
+            key, sep, value = line.strip().partition('=')
+            if sep:
+                result[key] = value
+    return result
+
+
 def main():
     if len(sys.argv) <= 1:
         print("Usage: run.py [config.json] [-p private_key.pem] [-v volume] args")
         return
     config_filename = sys.argv[1]
-    volumes = []
-    args = sys.argv[2:]
-    if args and args[0] == '-p':
-        private_key = args[1]
-        args = args[2:]
-    else:
-        private_key = None
-    while args and args[0] == '-v':
-        volumes.append(args[1])
-        args = args[2:]
-    if args and args[0] == '--':
-        args = args[1:]
-    config = Config(config_filename, private_key)
-    sys.exit(run(config, args, volumes))
+    config = Config(config_filename)
+    config.parse_args(sys.args[2:])
+    sys.exit(run(config))
 
 if __name__ == '__main__':
     main()
