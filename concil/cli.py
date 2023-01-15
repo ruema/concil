@@ -222,10 +222,10 @@ def do_copy(args):
 def do_shell(args):
     from concil.run import Config, run
     config = Config(args.image)
-    config.config['Entrypoint'] = ['/bin/bash']
+    config.config['Entrypoint'] = ['/bin/sh']
     config.config['Cmd'] = []
     config.check_volumes = False
-    config.args = args
+    config.args = args.args
     config.volumes = args.volume
     sys.exit(run(config, args.overlay_dir))
 

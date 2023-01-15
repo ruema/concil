@@ -20,6 +20,7 @@ PLATFORMS = {
 }
 
 CLONE = 0x38
+SYSCALL_PIDFD_OPEN = 434
 SIGCHLD = 17
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
@@ -128,19 +129,37 @@ def mount_volumes(mount_point, cwd, volumes):
     for source_path, mount_path, flags in volumes:
         mount_dir(mount_point, os.path.abspath(os.path.join(cwd, source_path)), mount_path, None, flags | MS_BIND | MS_REC)
 
+STD_VOLUMES = [
+    ("proc", "proc"),
+    (None, "dev"),
+    ("tmpfs", "tmp"),
+    ("tmpfs", "run"),
+    (None, "etc/hosts"),
+    (None, "etc/resolv.conf"),
+]
+
 def mount_std_volumes(mount_point):
-    mount_dir(mount_point, "proc", "proc", "proc", 0)
-    mount_dir(mount_point, "/dev", "dev", None, MS_BIND | MS_REC)
-    mount_dir(mount_point, "tmpfs", "tmp", "tmpfs", 0)
-    mount_dir(mount_point, "tmpfs", "run", "tmpfs", 0)
-    try:
-        mount_dir(mount_point, "/etc/hosts", "etc/hosts", None, MS_BIND | MS_REC)
-    except RuntimeError:
-        pass
-    try:
-        mount_dir(mount_point, "/etc/resolv.conf", "etc/resolv.conf", None, MS_BIND | MS_REC)
-    except RuntimeError:
-        pass
+    for fs_type, path in STD_VOLUMES:
+        try:
+            if fs_type is None:
+                mount_dir(mount_point, "/" + path, path, None, MS_BIND | MS_REC)
+            else:
+                mount_dir(mount_point, fs_type, path, fs_type, 0)
+        except RuntimeError:
+            # ignore mount errors
+            pass
+
+
+def read_environment_file(filename):
+    """ reads a file with key=value-pairs.
+    Returns a dict with the values."""
+    result = {}
+    with open(filename) as lines:
+        for line in lines:
+            key, sep, value = line.strip().partition('=')
+            if sep:
+                result[key] = value
+    return result
 
 
 class Config:
@@ -177,7 +196,7 @@ class Config:
             elif args[0] in ('-p', '--private-key'):
                 if len(args) <= 1:
                     break
-                if private_key is not None:
+                if self.private_key is not None:
                     print("only one private-key argument allowed")
                     return
                 self.private_key = args[1]
@@ -387,18 +406,17 @@ def run(config, overlay_work_dir=None):
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
 
-
-def read_environment_file(filename):
-    """ reads a file with key=value-pairs.
-    Returns a dict with the values."""
-    result = {}
-    with open(filename) as lines:
-        for line in lines:
-            key, sep, value = line.strip().partition('=')
-            if sep:
-                result[key] = value
-    return result
-
+def join(pid, args):
+    fd = libc.syscall(SYSCALL_PIDFD_OPEN, pid, 0, None, None, None)
+    if fd < 0:
+        logger.error("pidfd_open failed: %s", ctypes.get_errno())
+        return
+    if libc.setns(fd, CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID) < 0:
+        logger.error("setns failed: %s", ctypes.get_errno())
+        return
+    os.chdir("/")
+    commandline = args or ["/bin/sh"]
+    os.execvpe(commandline[0], commandline, {})
 
 def main():
     if len(sys.argv) <= 1:
