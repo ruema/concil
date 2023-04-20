@@ -135,7 +135,7 @@ class Store:
             pass
         elif config.get('content_trust', "") == "cosign":
             from .cosign import Cosign
-            self._cosign = Cosign(self._hub)
+            self._cosign = Cosign(self._hub, config={"key_dir": self._cache_dir / "cosign"})
         elif config.get('content_trust', "notary") == "notary":
             if notary_url is None:
                 notary_url = registry_url
@@ -159,10 +159,11 @@ class Store:
         cache_time = time.time() - self._cache_timeout
         to_be_removed = []
         for type in ['manifest', 'config', 'layers']:
-            for filename in (self._cache_dir / type).iterdir():
-                if filename.stat().st_mtime < cache_time:
-                    logging.debug("unlink %s", filename)
-                    to_be_removed.append(filename)
+            if (self._cache_dir / type).is_dir():
+                for filename in (self._cache_dir / type).iterdir():
+                    if filename.stat().st_mtime < cache_time:
+                        logging.debug("unlink %s", filename)
+                        to_be_removed.append(filename)
         for filename in to_be_removed:
             filename.unlink()
 

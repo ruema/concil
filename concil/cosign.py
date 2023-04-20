@@ -2,12 +2,16 @@ import base64
 import hashlib
 import json
 import datetime
+from pathlib import Path
 from ecdsa import SigningKey, VerifyingKey
 from ecdsa.util import sigencode_der, sigdecode_der
+import logging
+logger = logging.getLogger(__file__)
 
 class Cosign:
-    def __init__(self, hub):
+    def __init__(self, hub, config={}):
         self._hub = hub
+        self._config = config
 
     def publish(self, hashsum256, private_key):
         with open(private_key) as f:
@@ -23,7 +27,7 @@ class Cosign:
         }
         simplesigning_blob = json.dumps(simplesigning).encode('utf8')
         simplesigning_digest = hashlib.sha256(simplesigning_blob).hexdigest()
-        new_signature = sk.sign_deterministic(simplesigning_blob, sigencode=sigencode_der)
+        new_signature = sk.sign_deterministic(simplesigning_blob, hashlib.sha256, sigencode=sigencode_der)
         new_signature = base64.standard_b64encode(new_signature).decode('ASCII')
         config = {
             "architecture":"",
@@ -75,13 +79,23 @@ class Cosign:
             raise
 
     def check_signature(self, manifest):
-        hashsum256 = hashlib.sha256(manifest).hexdigest()
+        hashsum256 = 'sha256-%s.sig' % hashlib.sha256(manifest).hexdigest()
         manifest = self._hub.get_manifest(hash=hashsum256, accept="application/vnd.docker.distribution.manifest.v1+json,application/vnd.docker.distribution.manifest.v1+prettyjws,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json")
         manifest = json.loads(manifest)
         digest = manifest['layers'][-1]['digest']
         signature = manifest['layers'][-1]['annotations']['dev.cosignproject.cosign/signature']
+        signature = base64.standard_b64decode(signature)
         blob = self._hub.open_blob(digest).content
-        with open("cosign.pub") as f:
-            vk = VerifyingKey.from_pem(f.read())
-        if not vk.verify(base64.standard_b64decode(signature), blob, hashlib.sha256, sigdecode=sigdecode_der):
-            raise ValueError("signature verify failed")
+        directory = self._config.get('key_dir', '.')
+        if Path(directory).is_dir():
+            for keyfile in Path(directory).glob("*.pub"):
+                try:
+                    logger.info('trying key %s', keyfile)
+                    vk = VerifyingKey.from_pem(keyfile.read_bytes())
+                    if vk.verify(signature, blob, hashlib.sha256, sigdecode=sigdecode_der):
+                        return
+                except Exception as e:
+                    logger.debug(str(e))
+        else:
+            raise ValueError("no signing key found")
+        raise ValueError("signature verify failed")
