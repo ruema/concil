@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 import sys
 import os
+import platform
 from concil.dockerhub import parse_docker_url
 from concil.store import unsplit_url, Store
-from concil.run import Config, run
+from concil.run import AbstractConfig, LocalConfig, run, PLATFORMS
 import logging
 
-class StoreConfig(Config):
-    def __init__(self, store, private_key=None):
+class StoreConfig(AbstractConfig):
+    def __init__(self, store, private_key=None, environment=None):
+        super().__init__(private_key, environment)
         self.store = store
-        self.private_key = private_key
-        self.manifest = store.get_manifest()
+        self.manifest = store.get_manifest(PLATFORMS[platform.machine()], platform.system().lower())
         self.image_config = store.get_config(self.manifest['config'])
         self.config = self.image_config.get('config', {})
 
@@ -53,7 +54,7 @@ def main():
         store = Store(full_url)
         config = StoreConfig(store)
     else:
-        config = Config(filename)
+        config = LocalConfig(filename)
     config.parse_args(args[1:])
     sys.exit(run(config))
 

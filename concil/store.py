@@ -77,7 +77,7 @@ class Store:
         "cache_dir" : "~/.concil",
         "cache_timeout": 604800,
         "disable_content_trust": False,
-        "content_trust": "cosign",#"notary",
+        "content_trust": "notary", #"cosign",#
         "remote_servers": {
             "docker.io": {
                 "registry": "https://registry.hub.docker.com",
@@ -162,7 +162,7 @@ class Store:
             if (self._cache_dir / type).is_dir():
                 for filename in (self._cache_dir / type).iterdir():
                     if filename.stat().st_mtime < cache_time:
-                        logging.debug("unlink %s", filename)
+                        logger.debug("unlink %s", filename)
                         to_be_removed.append(filename)
         for filename in to_be_removed:
             filename.unlink()
@@ -172,15 +172,15 @@ class Store:
             digest = hashlib.sha256(bytes).hexdigest()
         path = self._cache_dir / type
         path.mkdir(parents=True, exist_ok=True)
-        logging.debug("storing %s/%s (%s bytes)", path, digest, len(bytes))
+        logger.debug("storing %s/%s (%s bytes)", path, digest, len(bytes))
         (path / digest).write_bytes(bytes)
 
     def get_cache(self, type, digest):
         filename = self._cache_dir / type / digest
-        logging.debug("trying cache %s", filename)
+        logger.debug("trying cache %s", filename)
         bytes = filename.read_bytes()
         filename.touch()
-        logging.debug("%s bytes read", len(bytes))
+        logger.debug("%s bytes read", len(bytes))
         return bytes
 
     def get_manifest(self, architecture=None, operating_system=None):
@@ -210,8 +210,10 @@ class Store:
             self._cosign.check_signature(manifest)
         manifest = json.loads(manifest)
         if manifest['mediaType'] == 'application/vnd.docker.distribution.manifest.list.v2+json':
+            logger.debug("looking for manifest %s/%s", architecture, operating_system)
             for entry in manifest['manifests']:
                 platform = entry['platform']
+                logger.debug("found manifest for %s/%s", platform['architecture'], platform['os'])
                 if platform['architecture'] == architecture and platform['os'] == operating_system:
                     break
             else:

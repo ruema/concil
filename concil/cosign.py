@@ -3,6 +3,7 @@ import hashlib
 import json
 import datetime
 from pathlib import Path
+import requests.exceptions
 from ecdsa import SigningKey, VerifyingKey
 from ecdsa.util import sigencode_der, sigdecode_der
 import logging
@@ -80,7 +81,12 @@ class Cosign:
 
     def check_signature(self, manifest):
         hashsum256 = 'sha256-%s.sig' % hashlib.sha256(manifest).hexdigest()
-        manifest = self._hub.get_manifest(hash=hashsum256, accept="application/vnd.docker.distribution.manifest.v1+json,application/vnd.docker.distribution.manifest.v1+prettyjws,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json")
+        try:
+            manifest = self._hub.get_manifest(hash=hashsum256, accept="application/vnd.docker.distribution.manifest.v1+json,application/vnd.docker.distribution.manifest.v1+prettyjws,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json")
+        except requests.exceptions.HTTPError as err:
+            if err.args[0].startswith('404'):
+                raise ValueError("image is not signed")
+            raise
         manifest = json.loads(manifest)
         digest = manifest['layers'][-1]['digest']
         signature = manifest['layers'][-1]['annotations']['dev.cosignproject.cosign/signature']

@@ -32,14 +32,14 @@ As a third component [fuse-overlayfs](https://github.com/containers/fuse-overlay
 ### Running a container
 
 ```shell
-$ concil_run.py docker://library/alpine:latest
+$ concil_run.py docker://docker.io/library/alpine:latest
 ```
 
 ### Creating a container
 
 First download a base image to a local directory:
 ```shell
-$ concil copy docker://library/alpine:latest ./alpine
+$ concil copy docker://docker.io/library/alpine:latest ./alpine
 ```
 
 Then add a directory as additional layer:

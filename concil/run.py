@@ -162,19 +162,13 @@ def read_environment_file(filename):
     return result
 
 
-class Config:
-    def __init__(self, manifest_filename, private_key=None, environment=None):
-        if os.path.isdir(manifest_filename):
-            manifest_filename = os.path.join(manifest_filename, 'manifest.json')
-        self.basepath = os.path.dirname(manifest_filename)
+class AbstractConfig:
+    def __init__(self, private_key=None, environment=None):
+        self.manifest = None
+        self.config = None
+        self.image_config = None
         self.private_key = private_key
         self.environment = dict(environment if environment is not None else os.environ)
-        with open(manifest_filename, 'r', encoding='utf8') as file:
-            self.manifest = json.load(file)
-        config_filename = os.path.join(self.basepath, self.manifest['config']['digest'].split(':',1)[1])
-        with open(config_filename, 'r', encoding='utf8') as file:
-            self.image_config = json.load(file)
-        self.config = self.image_config.get('config', {})
         self.check_volumes = True
         self.volumes = []
         self.args = []
@@ -229,7 +223,7 @@ class Config:
 
     def get_userid(self, etc_path=None):
         # user, uid, user:group, uid:gid, uid:group, user:gid
-        user = self.config.get('User', "0:0")
+        user = self.config.get('User') or "0:0"
         user, _, group = user.partition(':')
         return int(user), int(group)
 
@@ -275,6 +269,34 @@ class Config:
         payload = json.loads(jwetoken.payload)
         return "AES_256_CTR,{},{}".format(payload['symkey'], payload["cipheroptions"]['nonce'])
 
+    def get_volumes(self):
+        defined_volumes = self.config.get('Volumes') or {}
+        if not self.volumes:
+            return []
+        result = []
+        for volume in self.volumes:
+            source_path, _, other = volume.partition(':')
+            mount_path, _, flags = other.partition(':')
+            flags = MS_RDONLY if 'ro' in flags.split(',') else 0
+            mount_path = mount_path.strip('/')
+            if self.check_volumes and '/' + mount_path not in defined_volumes:
+                raise RuntimeError("mount volume not defined")
+            result.append((source_path, mount_path, flags))
+        return result
+    
+class LocalConfig(AbstractConfig):
+    def __init__(self, manifest_filename, private_key=None, environment=None):
+        super().__init__(private_key, environment)
+        if os.path.isdir(manifest_filename):
+            manifest_filename = os.path.join(manifest_filename, 'manifest.json')
+        self.basepath = os.path.dirname(manifest_filename)
+        with open(manifest_filename, 'r', encoding='utf8') as file:
+            self.manifest = json.load(file)
+        config_filename = os.path.join(self.basepath, self.manifest['config']['digest'].split(':',1)[1])
+        with open(config_filename, 'r', encoding='utf8') as file:
+            self.image_config = json.load(file)
+        self.config = self.image_config.get('config', {})
+
     def get_layers(self):
         layers = {}
         for layer in self.manifest["layers"]:
@@ -291,21 +313,6 @@ class Config:
             for l in self.image_config['rootfs']['diff_ids']
         ]
 
-    def get_volumes(self):
-        defined_volumes = self.config.get('Volumes') or {}
-        if not self.volumes:
-            return []
-        result = []
-        for volume in self.volumes:
-            source_path, _, other = volume.partition(':')
-            mount_path, _, flags = other.partition(':')
-            flags = MS_RDONLY if 'ro' in flags.split(',') else 0
-            mount_path = mount_path.strip('/')
-            if self.check_volumes and '/' + mount_path not in defined_volumes:
-                raise RuntimeError("mount volume not defined")
-            result.append((source_path, mount_path, flags))
-        return result
-    
 
 def pivot_root(mount_point):
     fd_oldroot = os.open('/', 0)
