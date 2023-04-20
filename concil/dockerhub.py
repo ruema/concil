@@ -4,6 +4,9 @@ import urllib
 import requests
 import base64
 import getpass
+import logging
+logger = logging.getLogger(__file__)
+
 
 def base64url_encode(payload):
     if not isinstance(payload, bytes):
@@ -105,7 +108,7 @@ class DockerHub(object):
     def check_login(self, response):
         if response.status_code != 401:
             return True
-        print(response.headers)
+        logger.debug(response.headers)
         self.session.headers.pop("authorization", None)
         www_authenticate = response.headers['Www-Authenticate']
         if not www_authenticate.startswith('Bearer'):
@@ -128,12 +131,12 @@ class DockerHub(object):
         return False
     
     def request(self, method, url, **kw):
-        print(url)
+        logger.info("%s %s", method, url)
         response = self.session.request(method, url, **kw)
-        print(response.headers)
+        logger.debug(response.headers)
         if not self.check_login(response):
             response = self.session.request(method, url, **kw)
-            print(response.headers)
+            logger.debug(response.headers)
         response.raise_for_status()
         return response
 

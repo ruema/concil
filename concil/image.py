@@ -142,7 +142,7 @@ class Descriptor:
         if self.media_type == 'squashfs':
             raise NotImplementedError()
         if self.media_type == 'dir':
-            return DirTarStream(self.filename)
+            return DirTarStream(self.filename.with_suffix(''))
         elif self.data:
             stream = io.BytesIO(self.data)
         else:

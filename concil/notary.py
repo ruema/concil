@@ -190,6 +190,16 @@ def encode_signed_json(private_keys, data):
     return b'{"signed":%s,"signatures":%s}' % (data, signatures)
 
 
+def generate_key_dict(public_key):
+    keyval = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    key_dict = {
+        "keytype": "ecdsa",
+        "keyval": {"private": None, "public": standard_b64encode(keyval).decode('utf8')}
+    }
+    key_id = hashlib.sha256(encode_json(key_dict)).hexdigest()
+    return key_dict, key_id
+
+
 class PrivateKeyStore(object):
     def __init__(self, path):
         self.path = Path(path).expanduser()
@@ -198,12 +208,7 @@ class PrivateKeyStore(object):
 
     def _generate_key(self):
         key = ec.generate_private_key(ec.SECP256R1(), default_backend())
-        keyval = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-        key_dict = {
-            "keytype": "ecdsa",
-            "keyval": {"private": None, "public": standard_b64encode(keyval).decode('utf8')}
-        }
-        key_id = hashlib.sha256(encode_json(key_dict)).hexdigest()
+        key_dict, key_id = generate_key_dict(key.public_key())
         return key, key_dict, key_id
 
     def get_root(self):
@@ -390,6 +395,11 @@ class Root(Metafile):
                         key_ids = ids
             if key_ids is not None:
                 root_keys = self.get_keys('root')
+                for key in root_keys.values():
+                    _, key_id = generate_key_dict(load_key(key))
+                    print("**", key_id)
+                    if key_id in key_ids:
+                        return
                 print(root_keys, key_ids)
                 for key_id in key_ids:
                     if key_id in root_keys:

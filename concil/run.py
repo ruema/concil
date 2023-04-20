@@ -93,7 +93,7 @@ def mount_dir(mount_point, source, target, type, options):
         # ignore error if source does not exist
         errno = ctypes.get_errno()
         if errno != 22:
-            raise RuntimeError("Mounting %s failed (%s)\n" % (target, errno))
+            raise RuntimeError("Mounting %s -> %s failed (%s)\n" % (source, target, errno))
 
 def wait_for_device(mount_point, device):
     for _ in range(1000):
@@ -313,14 +313,14 @@ def pivot_root(mount_point):
 
     ret = libc.mount(None, b"/", None, MS_PRIVATE | MS_REC, None)
     if ret < 0:
-        print("mount1")
+        logger.error("remounting root")
         return ret
     #ret = libc.mount(b".", b".", None, MS_BIND, None)
 
     # pivot_root into our new root fs
     ret = libc.pivot_root(".", ".")
     if ret < 0:
-        print("pivot")
+        logger.error("calling pivot")
         return ret
 
     # At this point the old-root is mounted on top of our new-root. To
@@ -328,7 +328,7 @@ def pivot_root(mount_point):
     # old-root.
     ret = libc.fchdir(fd_oldroot)
     if ret < 0:
-        print("chdir")
+        logger.error("calling chdir")
         return ret
 
     unmount(".")
@@ -354,7 +354,7 @@ def pivot_root(mount_point):
     # rootfs as a separate peer group mirroring the behavior on the host.
     ret = libc.mount(b"", b".", b"", MS_SHARED | MS_REC, None)
     if ret < 0:
-        print("mount")
+        logger.error("final shared mount")
         return ret
     return 0
 
@@ -378,6 +378,7 @@ def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None
         raise RuntimeError("exec failed: %s" % ctypes.get_errno())
     pid, status = os.waitpid(pid, 0)
     if overlay_work_dir:
+        time.sleep(.1)
         unmount(mount_point)
         overlay_process.wait()
     if status & 0xff:

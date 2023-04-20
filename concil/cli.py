@@ -1,21 +1,28 @@
 import sys
 import argparse
+import warnings
 from itertools import chain
 from collections import Counter
 from pathlib import Path
+import urllib3.exceptions
 from .image import ImageManifest, Descriptor
 from . import store
-from cryptography.hazmat.backends import default_backend
-from jwcrypto import jwk
-import urllib3.exceptions
-import warnings
 
 def generate_key(outputfilename, password):
+    from jwcrypto import jwk
     key = jwk.JWK.generate(kty='EC', crv='P-521')    
     with open(outputfilename + '.private.pem', 'wb') as output:
         output.write(key.export_to_pem(True, password.encode()))
     with open(outputfilename + '.pem', 'wb') as output:
         output.write(key.export_to_pem())
+
+def load_encryption_keys(filenames):
+    from jwcrypto import jwk
+    keys = []
+    for key in chain.from_iterable(filenames or []):
+        with open(key, 'rb') as inp:
+            keys.append(jwk.JWK.from_pem(inp.read()))
+    return keys
 
 def find_digest(digests, short_digest):
     """ Looks up a short digest in the list of digests.
@@ -133,10 +140,7 @@ def do_list(args):
 
 
 def do_copy(args):
-    keys = []
-    for key in chain.from_iterable(args.encryption or []):
-        with open(key, 'rb') as inp:
-            keys.append(jwk.JWK.from_pem(inp.read()))
+    keys = load_encryption_keys(args.encryption)
     image = ImageManifest.from_path(getattr(args,'source-image'))
     if args.remove_layer or args.merge_layers:
         layers = {
@@ -192,6 +196,9 @@ def do_copy(args):
     if args.squashfs:
         for layer in image.layers:
             layer.convert("squashfs")
+    if args.tar:
+        for layer in image.layers:
+            layer.convert("tar+gzip")
     for layer in image.layers:
         layer.encryption_keys = keys
     config = image.configuration['config']
@@ -215,6 +222,8 @@ def do_copy(args):
     if args.entrypoint is not None:
         import shlex
         config["Entrypoint"] = shlex.split(args.entrypoint)
+        if "Cmd" in config:
+            del config["Cmd"]
     if args.working_dir is not None:
         config["WorkingDir"] = args.working_dir
     image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
@@ -248,6 +257,8 @@ def main():
     parser_copy.add_argument('destination-image', help='destination directory')
     parser_copy.add_argument('--squashfs', action='store_true',
         help='convert layers to squashfs')
+    parser_copy.add_argument('--tar', action='store_true',
+        help='convert layers to tar')
     parser_copy.add_argument('--encryption', metavar="key", nargs="+", action='append',
         help='encryption keys')
     parser_copy.add_argument('--remove-layer', metavar="layer", nargs="+", action='append',
