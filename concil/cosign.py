@@ -4,41 +4,65 @@ import json
 import datetime
 from pathlib import Path
 import requests.exceptions
-from ecdsa import SigningKey, VerifyingKey
-from ecdsa.util import sigencode_der, sigdecode_der
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import load_pem_public_key, load_pem_private_key, Encoding, PublicFormat, PrivateFormat, BestAvailableEncryption
+from cryptography.exceptions import InvalidSignature
 import logging
 logger = logging.getLogger(__file__)
+
+
+def generate_signing_blob(reference, manifest_digest):
+    simplesigning = {
+        "critical": {
+            "identity": {"docker-reference": reference},
+            "image": {"docker-manifest-digest": "sha256:%s" % manifest_digest},
+            "type": "cosign container image signature"
+        },
+        "optional": None
+    }
+    return json.dumps(simplesigning).encode('utf8')
+
+
+def generate_signing_config(simplesigning_digest):
+    utcnow = datetime.datetime.utcnow().isoformat() + 'Z'
+    config = {
+        "architecture":"",
+        "created": utcnow,
+        "history": [{"created":"0001-01-01T00:00:00Z"}],
+        "os":"",
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:%s" % simplesigning_digest]},
+        "config": {}
+    }
+    return json.dumps(config).encode('utf8')
+
+
+def sign_blob(private_key, blob, password=None):
+    sk = load_pem_private_key(Path(private_key).read_bytes(), password)
+    sig = sk.sign(blob, ec.ECDSA(hashes.SHA256()))
+    return base64.standard_b64encode(sig).decode('ASCII')
+
+
+def verify_blob(keyfile, blob, signature):
+    vk = load_pem_public_key(keyfile.read_bytes())
+    try:
+        vk.verify(signature, blob, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        return False
+    return True
+
 
 class Cosign:
     def __init__(self, hub, config={}):
         self._hub = hub
         self._config = config
 
-    def publish(self, hashsum256, private_key):
-        with open(private_key) as f:
-           sk = SigningKey.from_pem(f.read())
-        utcnow = datetime.datetime.utcnow().isoformat() + 'Z'
-        simplesigning = {
-            "critical": {
-                "identity": {"docker-reference": self._hub.repository},
-                "image": {"docker-manifest-digest": "sha256:%s" % hashsum256},
-                "type": "cosign container image signature"
-            },
-            "optional": None
-        }
-        simplesigning_blob = json.dumps(simplesigning).encode('utf8')
+    def publish(self, manifest_digest, private_key):
+        simplesigning_blob = generate_signing_blob(self._hub.repository, manifest_digest)
         simplesigning_digest = hashlib.sha256(simplesigning_blob).hexdigest()
-        new_signature = sk.sign_deterministic(simplesigning_blob, hashlib.sha256, sigencode=sigencode_der)
-        new_signature = base64.standard_b64encode(new_signature).decode('ASCII')
-        config = {
-            "architecture":"",
-            "created": utcnow,
-            "history": [{"created":"0001-01-01T00:00:00Z"}],
-            "os":"",
-            "rootfs": {"type": "layers", "diff_ids": ["sha256:%s" % simplesigning_digest]},
-            "config": {}
-        }
-        config_blob = json.dumps(config).encode('utf8')
+        new_signature = sign_blob(private_key, simplesigning_blob)
+        config_blob = generate_signing_config(simplesigning_digest)
         config_digest = hashlib.sha256(config_blob).hexdigest()
         manifest = {
             'schemaVersion': 2,
@@ -73,7 +97,7 @@ class Cosign:
         print("Writing manifest to image destination.")
         data = json.dumps(manifest).encode()
         try:
-            hub.post_manifest(data, tag='sha256-%s.sig' % hashsum256, content_type='application/vnd.oci.image.manifest.v1+json')
+            hub.post_manifest(data, tag='sha256-%s.sig' % manifest_digest, content_type='application/vnd.oci.image.manifest.v1+json')
         except Exception as e:
             print(e.response.headers)
             print(e.response.content)
@@ -97,8 +121,7 @@ class Cosign:
             for keyfile in Path(directory).glob("*.pub"):
                 try:
                     logger.info('trying key %s', keyfile)
-                    vk = VerifyingKey.from_pem(keyfile.read_bytes())
-                    if vk.verify(signature, blob, hashlib.sha256, sigdecode=sigdecode_der):
+                    if verify_blob(keyfile, blob, signature):
                         return
                 except Exception as e:
                     logger.debug(str(e))
