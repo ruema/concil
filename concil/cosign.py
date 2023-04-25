@@ -98,9 +98,9 @@ class Cosign:
         data = json.dumps(manifest).encode()
         try:
             hub.post_manifest(data, tag='sha256-%s.sig' % manifest_digest, content_type='application/vnd.oci.image.manifest.v1+json')
-        except Exception as e:
-            print(e.response.headers)
-            print(e.response.content)
+        except requests.exceptions.HTTPError as err:
+            print(err.response.headers)
+            print(err.response.content)
             raise
 
     def check_signature(self, manifest):
