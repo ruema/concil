@@ -33,6 +33,34 @@ def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=No
             url += f'/{path}'
     return url
 
+def complete_url_with_auth(url, config):
+    repository = f"{url.hostname}{url.path}"
+    auths = dict(config.get("auths", {}))
+
+    # complete auths from environment
+    for key in os.environ:
+        if key.startswith('CONCIL_') and key.endswith('_REPO'):
+            repo = os.environ[key]
+            auth = os.environ.get(key.rsplit('_', 1)[0] + '_AUTH')
+            if auth:
+                auths[repo] = auth
+
+    if repository in auths:
+        auth = auths[repository]
+    else:
+        auth = None
+        longest = 0
+        for repo, repo_auth in auths.items():
+            if repo.endswith('*') and len(repo) > longest and repository.startswith(repo[:-1]):
+                longest = len(repo)
+                auth = repo_auth
+    if auth is None and url.hostname in auths:
+        auth = auths[url.hostname]
+    if auth is not None:
+        auth = urllib.parse.quote_plus(base64.standard_b64decode(auth).decode(), safe=':')
+        url = url._replace(netloc=f'{auth}@{url.netloc}')
+    return url
+
 def copyfileobj(fsrc, fdst, length=16*1024):
     """copy data from file-like object fsrc to file-like object fdst"""
     while True:
@@ -91,8 +119,9 @@ class Store:
         # 'docker://docker.io/library/alpine:latest'
         if url.scheme != "docker":
             raise ValueError("only docker://-url is supported")
+        config_path = Path(config_path).expanduser()
         try:
-            with Path(config_path).expanduser().open(encoding="utf8") as config_file:
+            with config_path.open(encoding="utf8") as config_file:
                 config = json.load(config_file)
         except FileNotFoundError:
             config = self.CONFIG_PARAMS
@@ -110,22 +139,9 @@ class Store:
         if registry_url is None:
             registry_url = unsplit_url("https", url.netloc)
             
-        if not url.username and "auths" in config:
-            repository = f"{url.hostname}{url.path}"
-            auths = config["auths"]
-            if repository in auths:
-                auth = auths[repository]
-            else:
-                auth = None
-                longest = 0
-                for repo, repo_auth in auths.items():
-                    if repo.endswith('*') and len(repo) > longest and repository.startswith(repo[:-1]):
-                        longest = len(repo)
-                        auth = repo_auth
-            if auth is not None:
-                auth = urllib.parse.quote_plus(auth, safe=':')
-                url = url._replace(netloc=f'{auth}@{url.netloc}')
-            
+        if not url.username:
+            url = complete_url_with_auth(url, config)
+
         registry_url = parse_docker_url(registry_url)
         full_url = unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
         logger.debug("full registry url: %s", full_url)
@@ -135,7 +151,7 @@ class Store:
             pass
         elif config.get('content_trust', "") == "cosign":
             from .cosign import Cosign
-            self._cosign = Cosign(self._hub, config={"key_dir": self._cache_dir / "cosign"})
+            self._cosign = Cosign(self._hub, config={"key_dir": config_path.parent / "cosign"})
         elif config.get('content_trust', "notary") == "notary":
             if notary_url is None:
                 notary_url = registry_url
