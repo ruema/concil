@@ -1,9 +1,7 @@
 import os
 import json
-import tempfile
 import base64
 import gzip
-import subprocess
 import shutil
 import io
 from hashlib import sha256, sha512
@@ -387,8 +385,14 @@ class ImageManifest:
         with (path / "version").open("w", encoding="utf8") as output:
             output.write(self.DIRECTORY_TRANSPORT)
 
-    def publish(self, docker_url, manifest_format=None, root_certificate=None):
+    def publish(self, docker_url, manifest_format=None, root_certificate=None, cosign_key=None):
         from .store import Store
+        store = Store(docker_url)
+        if root_certificate is not None and store._notary is None:
+            raise ValueError("notary not activated")
+        if cosign_key is not None and store._cosign is None:
+            raise ValueError("cosign not activated")
+
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = {
@@ -401,8 +405,6 @@ class ImageManifest:
             self._descriptor_to_dict(manifest_format, layer)
             for layer in self.layers
         ]
-        
-        store = Store(docker_url)
         hub = store._hub
         for layer in self.layers:
             if hub.has_blob(layer.digest):
@@ -427,7 +429,7 @@ class ImageManifest:
             raise
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
-        print(f"{len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
+        print(f"Manifest: {len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
         if store._notary is not None:
             from .notary import generate_hashes
             hashes = generate_hashes(data)
@@ -438,6 +440,4 @@ class ImageManifest:
                 print(e.response.headers)
                 print(e.response.text)
         if store._cosign is not None:
-            store._cosign.publish(sha256_digest, root_certificate)
-
-
+            store._cosign.publish(sha256_digest, cosign_key)

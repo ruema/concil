@@ -45,7 +45,7 @@ def sign_blob(private_key, blob, password=None):
 
 
 def verify_blob(keyfile, blob, signature):
-    vk = load_pem_public_key(keyfile.read_bytes())
+    vk = load_pem_public_key(keyfile.read_bytes(), backend=default_backend())
     try:
         vk.verify(signature, blob, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature:

@@ -3,12 +3,9 @@ import sys
 import os
 import time
 import json
-import uuid
 import subprocess
-import argparse
 import ctypes
 import ctypes.util
-import socket
 import platform
 import threading
 import logging

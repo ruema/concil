@@ -4,13 +4,15 @@ import warnings
 from itertools import chain
 from collections import Counter
 from pathlib import Path
+from getpass import getpass
 import urllib3.exceptions
 from .image import ImageManifest, Descriptor
 from . import store
 
 def generate_key(outputfilename, password):
     from jwcrypto import jwk
-    key = jwk.JWK.generate(kty='EC', crv='P-521')    
+    key = jwk.JWK.generate(kty='EC', crv='P-521')
+
     with open(outputfilename + '.private.pem', 'wb') as output:
         output.write(key.export_to_pem(True, password.encode()))
     with open(outputfilename + '.pem', 'wb') as output:
@@ -23,6 +25,14 @@ def load_encryption_keys(filenames):
         with open(key, 'rb') as inp:
             keys.append(jwk.JWK.from_pem(inp.read()))
     return keys
+
+def split_env(key_value):
+    """ splits a environment key=value into key and value.
+    If only key is given, return (key, None)
+    """
+    if '=' in key_value:
+        return key_value.split('=', 1)
+    return (key_value, None)
 
 def find_digest(digests, short_digest):
     """ Looks up a short digest in the list of digests.
@@ -203,19 +213,20 @@ def do_copy(args):
         layer.encryption_keys = keys
     config = image.configuration['config']
     if args.env:
-        print(args.env)
-        env = dict(kv.split('=',1) for env in args.env for kv in env)
+        env = dict(split_env(kv) for env in args.env for kv in env)
         environment = []
         if "Env" in config:
             for kv in config["Env"]:
-                k, v = kv.split('=', 1)
-                if k in env:
-                    v = env.pop(k)
-                    kv = f"{k}={v}"
-                if v:
+                k, v = split_env(kv)
+                if k not in env:
                     environment.append(kv)
         for k, v in env.items():
-            environment.append(f"{k}={v}")
+            if v == "":
+                pass
+            elif v is None:
+                environment.append(k)
+            else:
+                environment.append(f"{k}={v}")
         config["Env"] = environment
     if args.volumes:
         config["Volumes"] = {v:{} for vols in args.volumes for v in vols}
@@ -240,7 +251,31 @@ def do_shell(args):
 
 def do_publish(args):
     image = ImageManifest.from_path(args.image)
-    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE, args.root_certificate)
+    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE, args.root_certificate, args.cosign_key)
+
+
+def do_config_cosign_generate_key(args):
+    from jwcrypto import jwk
+    key_id = getattr(args, 'key-id')
+    key = jwk.JWK.generate(kty='EC', crv='P-256')
+    password = getpass("Enter password for private key:")
+    password_again = getpass("Enter password for private key again:")
+    if password != password_again:
+        print("passwords differ")
+        sys.exit(1)
+    print(f"Private key written to {key_id}.key")
+    with open(f"{key_id}.key", 'wb') as output:
+        output.write(key.export_to_pem(True, password.encode('utf8')))
+    print(f"Public key written to {key_id}.pub")
+    with open(f"{key_id}.pub", 'wb') as output:
+        output.write(key.export_to_pem())
+
+def do_config(args):
+    if args.config_cmd == "cosign-generate-key":
+        do_config_cosign_generate_key(args)
+    else:
+        assert False, "unknown command"
+
 
 def main():
     warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
@@ -281,9 +316,15 @@ def main():
     parser_shell.add_argument('args', nargs=argparse.REMAINDER)
 
     parser_publish = subparsers.add_parser('publish', help='publish image to docker hub')
-    parser_publish.add_argument('--root-certificate', action='store', help='root certificate')
+    parser_publish.add_argument('--root-certificate', action='store', help='root certificate for notary')
+    parser_publish.add_argument('--cosign-key', action='store', help='signing key for cosign')
     parser_publish.add_argument('image', help='image directory')
     parser_publish.add_argument('docker-url', help='docker url of the form docker://host/repository:tag')
+
+    parser_config = subparsers.add_parser('config', help='configuration commands')
+    subparsers_config = parser_config.add_subparsers(help='config-command help', dest='config_cmd')
+    parser_cosign_generate_key = subparsers_config.add_parser('cosign-generate-key', help='generates a signing key')
+    parser_cosign_generate_key.add_argument('key-id', help='the key-id')
 
     args = parser.parse_args()
     if args.cmd == 'list':
@@ -294,6 +335,8 @@ def main():
         do_shell(args)
     elif args.cmd == 'publish':
         do_publish(args)
+    elif args.cmd == 'config':
+        do_config(args)
     else:
         parser.print_help()
 
