@@ -624,6 +624,17 @@ class Notary(object):
         targets = self.targets if role is None else self.delegate_targets[role]
         targets.add_target_hashes(target, hashes)
 
+    def get_digest_for_tag(self, tag):
+        targets = self.targets.data['signed']['targets']
+        try:
+            target = targets[tag]
+        except KeyError:
+            logger.warning("tag not found %s", tag)
+            raise
+        logger.debug("notary target for %s: %r", tag, target)
+        hex_hash = base64.b16encode(base64url_decode(target['hashes']['sha256'])).decode('ascii').lower()
+        return f"sha256:{hex_hash}", target
+
     def _get_keys(self, role):
         key_ids = self.root.get_keys(role)
         if key_ids:

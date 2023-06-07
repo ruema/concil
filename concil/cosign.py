@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import load_pem_public_key, load_pem_private_key, Encoding, PublicFormat, PrivateFormat, BestAvailableEncryption
 from cryptography.exceptions import InvalidSignature
+from . import oci_spec
 import logging
 logger = logging.getLogger(__file__)
 
@@ -32,7 +33,7 @@ def generate_signing_config(simplesigning_digest):
         "created": utcnow,
         "history": [{"created":"0001-01-01T00:00:00Z"}],
         "os":"",
-        "rootfs": {"type": "layers", "diff_ids": ["sha256:%s" % simplesigning_digest]},
+        "rootfs": {"type": "layers", "diff_ids": [simplesigning_digest]},
         "config": {}
     }
     return json.dumps(config).encode('utf8')
@@ -60,38 +61,28 @@ class Cosign:
 
     def publish(self, manifest_digest, private_key):
         simplesigning_blob = generate_signing_blob(self._hub.repository, manifest_digest)
-        simplesigning_digest = hashlib.sha256(simplesigning_blob).hexdigest()
         new_signature = sign_blob(private_key, simplesigning_blob)
-        config_blob = generate_signing_config(simplesigning_digest)
-        config_digest = hashlib.sha256(config_blob).hexdigest()
-        manifest = {
-            'schemaVersion': 2,
-            'mediaType': 'application/vnd.oci.image.manifest.v1+json',
-            'config': {
-                'mediaType': 'application/vnd.oci.image.config.v1+json',
-                'size': len(config_blob),
-                'digest': 'sha256:%s' % config_digest
-            },
-            'layers': [{
-                'mediaType': 'application/vnd.dev.cosign.simplesigning.v1+json',
-                'size': len(simplesigning_blob),
-                'digest': 'sha256:%s' % simplesigning_digest,
-                'annotations': {'dev.cosignproject.cosign/signature': new_signature}
-            }],
-        }
+        layer = oci_spec.Descriptor.from_data(
+            simplesigning_blob,
+            'application/vnd.dev.cosign.simplesigning.v1+json',
+            annotations={'dev.cosignproject.cosign/signature': new_signature}
+        )
+        config_blob = generate_signing_config(layer.digest)
+        config = oci_spec.Descriptor.from_data(config_blob, "config")
+        manifest = oci_spec.manifest_to_dict(config, layers=[layer])
         hub = self._hub
-        if hub.has_blob("sha256:" + simplesigning_digest):
-            print(f"Blob {simplesigning_digest} found.")
+        if hub.has_blob(layer.digest):
+            print(f"Blob {layer.digest} found.")
         else:
-            print(f"Blob {simplesigning_digest} uploading...")
-            hub.post_blob_data(simplesigning_blob, simplesigning_digest)
+            print(f"Blob {layer.digest} uploading...")
+            hub.post_blob_data(simplesigning_blob, layer.digest)
             print("finished.")
 
-        if hub.has_blob("sha256:" + config_digest):
-            print(f"Blob {config_digest} found.")
+        if hub.has_blob(config.digest):
+            print(f"Blob {config.digest} found.")
         else:
-            print(f"Blob {config_digest} uploading...")
-            hub.post_blob_data(config_blob, config_digest)
+            print(f"Blob {config.digest} uploading...")
+            hub.post_blob_data(config_blob, config.digest)
             print("finished.")
 
         print("Writing manifest to image destination.")

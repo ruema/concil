@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 from getpass import getpass
 import urllib3.exceptions
-from .image import ImageManifest, Descriptor
+from .image import ImageManifest, LayerDescriptor
 from . import store
 
 def generate_key(outputfilename, password):
@@ -199,7 +199,7 @@ def do_copy(args):
                 media_type = 'dir'
             else:
                 raise RuntimeError("unsupported file type")
-            layer = Descriptor(path, media_type, None)
+            layer = LayerDescriptor(path, media_type, None)
             layer.status = 'new'
             print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type} added.")
             image.layers.append(layer)

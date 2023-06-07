@@ -9,7 +9,6 @@ import shutil
 import urllib.parse
 from pathlib import Path
 from gzip import GzipFile
-from jwcrypto.common import base64url_decode, base64url_encode
 from .dockerhub import DockerHub, parse_docker_url
 from .notary import Notary, check_hashes
 logger = logging.getLogger(__name__)
@@ -201,20 +200,9 @@ class Store:
 
     def get_manifest(self, architecture=None, operating_system=None):
         if self._notary is None:
-            target = None
-        else:
-            targets = self._notary.targets.data['signed']['targets']
-            try:
-                target = targets[self.url.tag]
-            except KeyError:
-                logger.warning("tag not found %s", self.url.tag)
-                import sys;sys.exit(9)
-            logger.debug("notary target for %s: %r", self.url.tag, target)
-        if not target:
             manifest = self._hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
         else:
-            hex_hash = base64.b16encode(base64url_decode(target['hashes']['sha256'])).decode('ascii').lower()
-            hex_digest = f"sha256:{hex_hash}"
+            hex_digest, target = self._notary.get_digest_for_tag(self.url.tag)
             try:
                 manifest = self.get_cache("manifest", hex_digest)
             except FileNotFoundError:

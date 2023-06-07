@@ -6,14 +6,16 @@ import shutil
 import io
 from hashlib import sha256, sha512
 from pathlib import Path
+import requests.exceptions
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from jwcrypto import jwk, jwe
-from jwcrypto.common import base64url_decode, base64url_encode
+from jwcrypto.common import base64url_encode
 from .store import IMAGE_CONVERTERS
 from .streams import MergedTarStream, GZipStream, DirTarStream
 from .dockerhub import DockerHub, DockerPath
+from . import oci_spec
 
 class FormatError(Exception):
     pass
@@ -80,7 +82,7 @@ def encrypt(input_stream, encrypted_filename):
     return pub_data, payload, sha_hash_encrypted
     
 
-class Descriptor:
+class LayerDescriptor:
     def __init__(self, filename, media_type, digest, annotations=None, size=None):
         self.filename = filename
         self.media_type = media_type
@@ -240,41 +242,10 @@ class Descriptor:
 
 
 class ImageManifest:
-    DIRECTORY_TRANSPORT = "Directory Transport Version: 1.1\n"
-    MANIFEST_DOCKER_MEDIA_TYPE = "application/vnd.docker.distribution.manifest.v2+json"
-    MANIFEST_OCI_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
-    MEDIA_TYPES = {
-        MANIFEST_OCI_MEDIA_TYPE: {
-            "config": "application/vnd.oci.image.config.v1+json",
-            "tar": "application/vnd.oci.image.layer.v1.tar",
-            "tar+gzip": "application/vnd.oci.image.layer.v1.tar+gzip",
-            "tar+zstd": "application/vnd.oci.image.layer.v1.tar+zstd",
-            "tar+encrypted": "application/vnd.oci.image.layer.v1.tar+encrypted",
-            "tar+gzip+encrypted": "application/vnd.oci.image.layer.v1.tar+gzip+encrypted",
-            "tar+zstd+encrypted": "application/vnd.oci.image.layer.v1.tar+zstd+encrypted",
-            "squashfs": "application/vnd.oci.image.layer.v1.squashfs",
-            "squashfs+encrypted": "application/vnd.oci.image.layer.v1.squashfs+encrypted",
-        },
-        MANIFEST_DOCKER_MEDIA_TYPE: {
-            "config": "application/vnd.docker.container.image.v1+json",
-            "tar": "application/vnd.docker.image.rootfs.diff.tar",
-            "tar+gzip": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-            "tar+zstd": "application/vnd.docker.image.rootfs.diff.tar.zstd",
-            "tar+encrypted": "application/vnd.docker.image.rootfs.diff.tar+encrypted",
-            "tar+gzip+encrypted": "application/vnd.docker.image.rootfs.diff.tar.gzip+encrypted",
-            "tar+zstd+encrypted": "application/vnd.docker.image.rootfs.diff.tar.zstd+encrypted",
-            "squashfs": "application/vnd.docker.image.rootfs.diff.squashfs",
-            "squashfs+encrypted": "application/vnd.docker.image.rootfs.diff.squashfs+encrypted",
-        }
-    }
-    _REVERSED_MEDIA_TYPES = {
-        key: value for types in MEDIA_TYPES.values() for value, key in types.items()
-    }
-
     def __init__(self, path, manifest_format=None):
         self.path = path
         self.schema_version = 2
-        self.manifest_format = manifest_format if manifest_format is not None else self.MANIFEST_DOCKER_MEDIA_TYPE
+        self.manifest_format = manifest_format if manifest_format is not None else oci_spec.MANIFEST_DOCKER_MEDIA_TYPE
         self.config = None
         self._configuration = None
         self.layers = []
@@ -283,12 +254,12 @@ class ImageManifest:
     @classmethod
     def _make_descriptor(cls, path, meta):
         media_type = meta['mediaType']
-        media_type = cls._REVERSED_MEDIA_TYPES.get(media_type, media_type)
+        media_type = oci_spec.REVERSED_MEDIA_TYPES.get(media_type, media_type)
         digest = meta['digest']
         annotations = meta.get('annotations', {})
         size = meta.get('size')
         filename = path / digest.split(':', 1)[1]
-        return Descriptor(filename, media_type, digest, annotations, size)
+        return LayerDescriptor(filename, media_type, digest, annotations, size)
 
     @classmethod
     def from_path(cls, path):
@@ -313,7 +284,7 @@ class ImageManifest:
                 manifest = json.load(manifest)
         if manifest.get("schemaVersion") != 2:
             raise FormatError("unkown schema version")
-        media_type = manifest.get("mediaType", cls.MANIFEST_OCI_MEDIA_TYPE)
+        media_type = manifest.get("mediaType", oci_spec.MANIFEST_OCI_MEDIA_TYPE)
         result = cls(path, media_type)
         result.config = cls._make_descriptor(path, manifest["config"])
         result.layers = [
@@ -321,17 +292,6 @@ class ImageManifest:
             for layer in manifest["layers"]
         ]
         result.annotations = manifest.get('annotations',{})
-        return result
-
-    def _descriptor_to_dict(self, manifest_format, descriptor):
-        media_type = descriptor.media_type
-        result = {
-            "mediaType": self.MEDIA_TYPES[manifest_format].get(media_type, media_type),
-            "size": descriptor.size,
-            "digest": descriptor.digest,
-        }
-        if descriptor.annotations:
-            result["annotations"] = descriptor.annotations
         return result
 
     @property
@@ -368,22 +328,12 @@ class ImageManifest:
             for digest in config['rootfs']['diff_ids']
             if digests[digest] is not None
         ] + new_diffs
-        config = Descriptor.from_data(json.dumps(config).encode('utf8'), "config")
-        manifest = {
-            "schemaVersion":2,
-        }
-        if manifest_format != self.MANIFEST_OCI_MEDIA_TYPE:
-            manifest["mediaType"] = manifest_format
-        manifest['config'] = self._descriptor_to_dict(manifest_format, config.export(path))
-        manifest['layers'] = [
-            self._descriptor_to_dict(manifest_format, layer)
-            for layer in export_layers
-            
-        ]
+        config = LayerDescriptor.from_data(json.dumps(config).encode('utf8'), "config")
+        manifest = oci_spec.manifest_to_dict(config.export(path), export_layers, manifest_format)
         with (path / "manifest.json").open("w", encoding="utf8") as output:
             json.dump(manifest, output)
         with (path / "version").open("w", encoding="utf8") as output:
-            output.write(self.DIRECTORY_TRANSPORT)
+            output.write(oci_spec.DIRECTORY_TRANSPORT)
 
     def publish(self, docker_url, manifest_format=None, root_certificate=None, cosign_key=None):
         from .store import Store
@@ -395,16 +345,8 @@ class ImageManifest:
 
         if manifest_format is None:
             manifest_format = self.manifest_format
-        manifest = {
-            "schemaVersion": 2,
-        }
-        if manifest_format != self.MANIFEST_OCI_MEDIA_TYPE:
-            manifest["mediaType"] = manifest_format
-        manifest['config'] = self._descriptor_to_dict(manifest_format, self.config)
-        manifest['layers'] = [
-            self._descriptor_to_dict(manifest_format, layer)
-            for layer in self.layers
-        ]
+        manifest = oci_spec.manifest_to_dict(self.config, self.layers, manifest_format)
+        
         hub = store._hub
         for layer in self.layers:
             if hub.has_blob(layer.digest):
@@ -423,9 +365,9 @@ class ImageManifest:
         data = json.dumps(manifest).encode()
         try:
             hub.post_manifest(data)
-        except Exception as e:
-            print(e.response.headers)
-            print(e.response.content)
+        except requests.exceptions.HTTPError as err:
+            print(err.response.headers)
+            print(err.response.content)
             raise
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
@@ -436,8 +378,8 @@ class ImageManifest:
             store._notary.add_target_hashes(store.url.tag, hashes)
             try:
                 store._notary.publish(root_certificate)
-            except Exception as e:
-                print(e.response.headers)
-                print(e.response.text)
+            except requests.exceptions.HTTPError as err:
+                print(err.response.headers)
+                print(err.response.text)
         if store._cosign is not None:
             store._cosign.publish(sha256_digest, cosign_key)
