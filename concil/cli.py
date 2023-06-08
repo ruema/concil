@@ -7,7 +7,7 @@ from pathlib import Path
 from getpass import getpass
 import urllib3.exceptions
 from .image import ImageManifest, LayerDescriptor
-from . import store
+from . import store, oci_spec
 
 def generate_key(outputfilename, password):
     from jwcrypto import jwk
@@ -240,8 +240,8 @@ def do_copy(args):
     image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
 
 def do_shell(args):
-    from concil.run import Config, run
-    config = Config(args.image)
+    from .run import LocalConfig, run
+    config = LocalConfig(args.image)
     config.config['Entrypoint'] = ['/bin/sh']
     config.config['Cmd'] = []
     config.check_volumes = False
@@ -251,10 +251,21 @@ def do_shell(args):
 
 def do_publish(args):
     image = ImageManifest.from_path(args.image)
-    image.publish(getattr(args, 'docker-url'), image.MANIFEST_DOCKER_MEDIA_TYPE, args.root_certificate, args.cosign_key)
+    image.publish(getattr(args, 'docker-url'), oci_spec.MANIFEST_DOCKER_MEDIA_TYPE, args.root_certificate, args.cosign_key)
 
 
-def do_config_cosign_generate_key(args):
+def store_concil_key(cosign_path, key_id, key, password):
+    cosign_path.mkdir(parents=True, exist_ok=True)
+    if key.has_private:
+        print(f"Private key written to {key_id}.key")
+        (cosign_path / f"{key_id}.key").write_bytes(
+            key.export_to_pem(True, password.encode('utf8') or None))
+    print(f"Public key written to {key_id}.pub")
+    (cosign_path / f"{key_id}.pub").write_bytes(
+        key.export_to_pem())
+
+
+def do_config_cosign_generate_key(config, args):
     from jwcrypto import jwk
     key_id = getattr(args, 'key-id')
     key = jwk.JWK.generate(kty='EC', crv='P-256')
@@ -263,16 +274,66 @@ def do_config_cosign_generate_key(args):
     if password != password_again:
         print("passwords differ")
         sys.exit(1)
-    print(f"Private key written to {key_id}.key")
-    with open(f"{key_id}.key", 'wb') as output:
-        output.write(key.export_to_pem(True, password.encode('utf8')))
-    print(f"Public key written to {key_id}.pub")
-    with open(f"{key_id}.pub", 'wb') as output:
-        output.write(key.export_to_pem())
+    store_concil_key(config.cosign_path, key_id, key, password)
+
+
+def do_config_cosign_list_keys(config, args):
+    cosign_path = config.cosign_path
+    if not cosign_path.is_dir():
+        print(f"no keys found")
+        return
+    public_keys = {
+        path.stem for path in cosign_path.glob('*.pub')
+    }
+    private_keys = {
+        path.stem for path in cosign_path.glob('*.key')
+    }
+    keys = sorted(public_keys | private_keys)
+    max_length = max(6, max(map(len, keys)))
+    print(f"{'Key-ID':{max_length}s} public private")
+    for key in keys:
+        public = "  x   " if key in public_keys else ""
+        private = "   x" if key in private_keys else ""
+        print(f"{key:{max_length}s} {public} {private}")
+
+
+def do_config_cosign_export_key(config, args):
+    cosign_path = config.cosign_path
+    key_id = getattr(args, 'key-id')
+    if args.private:
+        path = cosign_path / f"{key_id}.key"
+    else:
+        path = cosign_path / f"{key_id}.pub"
+    if not path.is_file():
+        print(f"key with id {key_id} not found")
+        return
+    data = path.read_bytes()
+    Path(args.filename).write_bytes(data)
+
+
+def do_config_cosign_import_key(config, args):
+    from jwcrypto import jwk
+    key_id = getattr(args, 'key-id')
+    data = Path(args.filename).read_bytes()
+    try:
+        key = jwk.JWK.from_pem(data)
+        password = ""
+    except TypeError:
+        password = getpass("Enter password for private key:")
+        key = jwk.JWK.from_pem(data, password.encode('utf8'))
+    store_concil_key(config.cosign_path, key_id, key, password)
+
 
 def do_config(args):
-    if args.config_cmd == "cosign-generate-key":
-        do_config_cosign_generate_key(args)
+    config = store.ConcilConfig()
+    if args.config_cmd == "cosign-list-keys":
+        do_config_cosign_list_keys(config, args)
+    elif args.config_cmd == "cosign-generate-key":
+        do_config_cosign_generate_key(config, args)
+    elif args.config_cmd == "cosign-export-key":
+        do_config_cosign_export_key(config, args)
+    elif args.config_cmd == "cosign-import-key":
+        do_config_cosign_import_key(config, args)
     else:
         assert False, "unknown command"
 
@@ -323,8 +384,16 @@ def main():
 
     parser_config = subparsers.add_parser('config', help='configuration commands')
     subparsers_config = parser_config.add_subparsers(help='config-command help', dest='config_cmd')
+    parser_cosign_list_keys = subparsers_config.add_parser('cosign-list-keys', help='list all signing keys')
     parser_cosign_generate_key = subparsers_config.add_parser('cosign-generate-key', help='generates a signing key')
     parser_cosign_generate_key.add_argument('key-id', help='the key-id')
+    parser_cosign_export_key = subparsers_config.add_parser('cosign-export-key', help='export a signing key')
+    parser_cosign_export_key.add_argument('key-id', help='the key-id')
+    parser_cosign_export_key.add_argument('filename', help='output filename')
+    parser_cosign_export_key.add_argument('--private', action="store_true", help='export the private key')
+    parser_cosign_import_key = subparsers_config.add_parser('cosign-import-key', help='import a private or public signing key')
+    parser_cosign_import_key.add_argument('key-id', help='the key-id')
+    parser_cosign_import_key.add_argument('filename', help='key filename')
 
     args = parser.parse_args()
     if args.cmd == 'list':

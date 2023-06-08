@@ -34,7 +34,7 @@ def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=No
 
 def complete_url_with_auth(url, config):
     repository = f"{url.hostname}{url.path}"
-    auths = dict(config.get("auths", {}))
+    auths = dict(config.params("auths", {}))
 
     # complete auths from environment
     for key in os.environ:
@@ -98,74 +98,136 @@ IMAGE_CONVERTERS = {
     "tar+gzip": convert_tar_gzip,
 }
 
-class Store:
-    CONFIG_PATH = "~/.concil/config.json"
-    CONFIG_PARAMS = {
-        "cache_dir" : "~/.concil",
-        "cache_timeout": 604800,
-        "disable_content_trust": False,
-        "content_trust": "notary", #"cosign",#
-        "remote_servers": {
-            "docker.io": {
-                "registry": "https://registry.hub.docker.com",
-                "notary": "https://notary.docker.io",
-            },
+
+CONFIG_PATH = "~/.concil/config.json"
+CONFIG_PARAMS = {
+    "cache_dir" : "~/.concil",
+    "cache_timeout": 604800,
+    "disable_content_trust": False,
+    "content_trust": "notary", #"cosign",#
+    "remote_servers": {
+        "docker.io": {
+            "registry": "https://registry.hub.docker.com",
+            "notary": "https://notary.docker.io",
         },
-    }
-    def __init__(self, url, config_path=CONFIG_PATH, verify=None):
+    },
+}
+
+class ConcilConfig:
+    def __init__(self, config_path=None):
+        if config_path is None:
+            config_path = os.environ.get("CONCIL_CONFIG", CONFIG_PATH)
+        config_path = Path(config_path).expanduser()
+        try:
+            with config_path.open(encoding="utf8") as config_file:
+                params = json.load(config_file)
+        except FileNotFoundError:
+            params = CONFIG_PARAMS
+        self.path = config_path
+        self.params = params
+
+    @property
+    def cafile(self):
+        """ returns the cafile as Path if set """
+        if 'cafile' in self.params:
+            return Path(self.params['cafile']).expanduser()
+        return None
+
+    @property
+    def disable_content_trust(self):
+        return self.params.get("disable_content_trust", False)
+
+    @property
+    def cache_dir(self):
+        return Path(self.params['cache_dir']).expanduser()
+
+    @property
+    def cache_timeout(self):
+        return self.params.get('cache_timeout', 604800)
+
+    @property
+    def content_trust(self):
+        return self.params.get('content_trust', "notary")
+
+    @property
+    def cosign_path(self):
+        return self.path.parent / "cosign"
+
+    @property
+    def notary_path(self):
+        return self.cache_dir / "notary"
+
+    @property
+    def notary_trust_pinning(self):
+        return self.params.get("trust_pinning", {})
+
+    def get_server_info(self, hostname):
+        remote_servers = self.params.get("remote_servers")
+        if remote_servers:
+            return remote_servers.get(hostname)
+        return {}
+
+
+def get_full_url(url, config):
+    info = config.get_server_info(url.hostname)
+    registry_url = info.get('registry')
+    if registry_url is None:
+        registry_url = unsplit_url("https", url.netloc)
+    registry_url = parse_docker_url(registry_url)
+    return unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
+
+def get_notary_url(url, config):
+    info = config.get_server_info(url.hostname)
+    notary_url = info.get('notary')
+    if notary_url is None:
+        registry_url = info.get('registry')
+        if registry_url is None:
+            registry_url = unsplit_url("https", url.netloc)
+        notary_url = parse_docker_url(registry_url)
+        port = 4443
+    else:
+        notary_url = parse_docker_url(notary_url)
+        port = notary_url.port
+    _, _, hostname = url.netloc.rpartition('@')
+    hostname, _, _ = hostname.partition(':')
+    path = f"{hostname}/{url.repository}"
+    return unsplit_url(notary_url.scheme, notary_url.netloc, path, url.username, url.password, port=port)
+
+
+class Store:
+    def __init__(self, url, config=None, verify=None):
         url = parse_docker_url(url)
         self.url = url
         # 'docker://docker.io/library/alpine:latest'
         if url.scheme != "docker":
             raise ValueError("only docker://-url is supported")
-        config_path = Path(config_path).expanduser()
-        try:
-            with config_path.open(encoding="utf8") as config_file:
-                config = json.load(config_file)
-        except FileNotFoundError:
-            config = self.CONFIG_PARAMS
-        if verify is None and 'cafile' in config:
-            verify = Path(config['cafile']).expanduser()
-        disable_content_trust = config.get("disable_content_trust", False)
-        registry_url = notary_url = None
-        self._cache_dir = Path(config['cache_dir']).expanduser()
-        self._cache_timeout = config.get('cache_timeout', 604800)
-        if 'remote_servers' in config:
-            if url.hostname in config['remote_servers']:
-                info = config['remote_servers'][url.hostname]
-                registry_url = info.get('registry')
-                notary_url = info.get('notary')
-        if registry_url is None:
-            registry_url = unsplit_url("https", url.netloc)
-            
+        if config is None:
+            config = ConcilConfig()
+        if verify is None:
+            verify = config.cafile
+        self._cache_dir = config.cache_dir
+        self._cache_timeout = config.cache_timeout
+
         if not url.username:
             url = complete_url_with_auth(url, config)
-
-        registry_url = parse_docker_url(registry_url)
-        full_url = unsplit_url(registry_url.scheme, registry_url.netloc, url.path, url.username, url.password)
+        full_url = get_full_url(url, config)
         logger.debug("full registry url: %s", full_url)
         self._hub = DockerHub(full_url, verify=verify)
+
         self._notary = self._cosign = None
-        if disable_content_trust:
+        if config.disable_content_trust:
             pass
-        elif config.get('content_trust', "") == "cosign":
+        elif config.content_trust == "cosign":
             from .cosign import Cosign
-            self._cosign = Cosign(self._hub, config={"key_dir": config_path.parent / "cosign"})
-        elif config.get('content_trust', "notary") == "notary":
-            if notary_url is None:
-                notary_url = registry_url
-                port = 4443
-            else:
-                notary_url = parse_docker_url(notary_url)
-                port = notary_url.port
-            _, _, hostname = url.netloc.rpartition('@')
-            hostname, _, _ = hostname.partition(':')
-            path = f"{hostname}/{url.repository}"
-            full_url = unsplit_url(notary_url.scheme, notary_url.netloc, path, url.username, url.password, port=port)
+            self._cosign = Cosign(self._hub,
+                config={"key_dir": config.cosign_path}
+            )
+        elif config.content_trust == "notary":
+            full_url = get_notary_url(url, config)
             logger.debug("full notary url: %s", full_url)
             self._notary = Notary(full_url, config={
-                "trust_dir" : self._cache_dir / "notary",
-                "trust_pinning": config.get("trust_pinning", {}),
+                "trust_dir" : config.notary_path,
+                "trust_pinning": config.notary_trust_pinning,
             }, verify=verify)
         else:
             raise RuntimeError("unknown content trust")

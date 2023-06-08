@@ -60,6 +60,11 @@ class Cosign:
         self._config = config
 
     def publish(self, manifest_digest, private_key):
+        directory = self._config.get('key_dir')
+        if directory:
+            path = Path(directory) / f"{private_key}.key"
+            if path.is_file():
+                private_key = path
         simplesigning_blob = generate_signing_blob(self._hub.repository, manifest_digest)
         new_signature = sign_blob(private_key, simplesigning_blob)
         layer = oci_spec.Descriptor.from_data(
@@ -107,8 +112,8 @@ class Cosign:
         signature = manifest['layers'][-1]['annotations']['dev.cosignproject.cosign/signature']
         signature = base64.standard_b64decode(signature)
         blob = self._hub.open_blob(digest).content
-        directory = self._config.get('key_dir', '.')
-        if Path(directory).is_dir():
+        directory = self._config.get('key_dir')
+        if directory and Path(directory).is_dir():
             for keyfile in Path(directory).glob("*.pub"):
                 try:
                     logger.info('trying key %s', keyfile)
