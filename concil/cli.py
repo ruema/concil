@@ -237,7 +237,7 @@ def do_copy(args):
             del config["Cmd"]
     if args.working_dir is not None:
         config["WorkingDir"] = args.working_dir
-    image.export(getattr(args, 'destination-image'), image.MANIFEST_DOCKER_MEDIA_TYPE)
+    image.export(getattr(args, 'destination-image'), oci_spec.MANIFEST_DOCKER_MEDIA_TYPE)
 
 def do_shell(args):
     from .run import LocalConfig, run

@@ -34,7 +34,7 @@ def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=No
 
 def complete_url_with_auth(url, config):
     repository = f"{url.hostname}{url.path}"
-    auths = dict(config.params("auths", {}))
+    auths = dict(config.params.get("auths", {}))
 
     # complete auths from environment
     for key in os.environ:

@@ -40,7 +40,12 @@ def generate_signing_config(simplesigning_digest):
 
 
 def sign_blob(private_key, blob, password=None):
-    sk = load_pem_private_key(Path(private_key).read_bytes(), password)
+    try:
+        sk = load_pem_private_key(Path(private_key).read_bytes(), password)
+    except TypeError:
+        import getpass
+        password = getpass.getpass("Password for key %s:" % private_key).encode('utf8')
+        sk = load_pem_private_key(Path(private_key).read_bytes(), password)
     sig = sk.sign(blob, ec.ECDSA(hashes.SHA256()))
     return base64.standard_b64encode(sig).decode('ASCII')
 

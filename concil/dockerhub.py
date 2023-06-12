@@ -155,12 +155,13 @@ class DockerHub(object):
         return response
 
     def post_blob_data(self, data, digest):
+        """uploads the data with the given digest of format "sha256:1234...". """
         self.session.cookies.clear()
         response = self.request("POST", self.url + "/blobs/uploads/")
         location = response.headers['Location']
         self.session.cookies.clear()
         response = self.session.put(location,
-            params={"digest": "sha256:" + digest},
+            params={"digest": digest},
             headers={"Content-Type": "application/octet-stream"},
             data=data)
         if response.status_code != 201:

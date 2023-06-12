@@ -158,11 +158,18 @@ class LayerDescriptor:
             output_filename = path / self.digest.split(':', 1)[1]
             if self.data:
                 input_stream = io.BytesIO(self.data)
+            elif isinstance(self.filename, DockerPath):
+                input_stream = self.filename.open('rb')
             else:
                 try:
                     os.link(self.filename, output_filename)
                     print(f"Link {self.digest} ({self.media_type})")
                     return type(self)(output_filename, self.media_type, self.digest, self.annotations)
+                except OSError as err:
+                    if err.errno == 18: # Invalid cross-device link:
+                        pass
+                    else:
+                        print(err)
                 except Exception as e:
                     print(e)
                     # if anything goes wrong, try to copy
