@@ -4,9 +4,9 @@ import os
 import platform
 import sys
 
-from concil.dockerhub import parse_docker_url
-from concil.run import PLATFORMS, AbstractConfig, LocalConfig, run
-from concil.store import Store, unsplit_url
+from .dockerhub import parse_docker_url
+from .run import PLATFORMS, AbstractConfig, LocalConfig, run
+from .store import Store, unsplit_url
 
 
 class StoreConfig(AbstractConfig):

@@ -31,4 +31,6 @@ dependencies = [
 Homepage = "https://github.com/ruema/concil"
 
 [project.scripts]
-concil_cli = "concil.cli:main"
+concil = "concil.cli:main"
+concil_run = "concil.concil_run:main"
+concil_join = "concil.concil_join:main"
