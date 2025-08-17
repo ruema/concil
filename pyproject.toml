@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concil"
+version = "0.3.0"
+authors = [
+    { name = "ruema" },
+]
+description = "container manager"
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+]
+
+dependencies = [
+    "cryptography",
+    "jwcrypto",
+    "requests",
+]
+
+[project.urls]
+Homepage = "https://github.com/ruema/concil"
+
+[project.scripts]
+concil_cli = "concil.cli:main"

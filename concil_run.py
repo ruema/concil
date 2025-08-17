@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-import sys
+import logging
 import os
 import platform
+import sys
+
 from concil.dockerhub import parse_docker_url
-from concil.store import unsplit_url, Store
-from concil.run import AbstractConfig, LocalConfig, run, PLATFORMS
-import logging
+from concil.run import PLATFORMS, AbstractConfig, LocalConfig, run
+from concil.store import Store, unsplit_url
+
 
 class StoreConfig(AbstractConfig):
     def __init__(self, store, private_key=None, environment=None):
         super().__init__(private_key, environment)
         self.store = store
-        self.manifest = store.get_manifest(PLATFORMS[platform.machine()], platform.system().lower())
-        self.image_config = store.get_config(self.manifest['config'])
-        self.config = self.image_config.get('config', {})
+        self.manifest = store.get_manifest(
+            PLATFORMS[platform.machine()], platform.system().lower()
+        )
+        self.image_config = store.get_config(self.manifest["config"])
+        self.config = self.image_config.get("config", {})
 
     def get_layers(self):
         layers = {}
@@ -21,16 +25,18 @@ class StoreConfig(AbstractConfig):
             filepath = self.store.get_layer(layer)
             filename = str(filepath)
             if layer["mediaType"].endswith("+encrypted"):
-                filename += ',' + self.get_key(layer)
+                filename += "," + self.get_key(layer)
             layers[filepath.name] = filename
         # now is a good time to cleanup the cache
         self.store.cache_cleanup()
-        return [layers[diff_id] for diff_id in self.image_config['rootfs']['diff_ids']]
+        return [layers[diff_id] for diff_id in self.image_config["rootfs"]["diff_ids"]]
 
 
 def main():
     if len(sys.argv) <= 1:
-        print("Usage: concil_run.py <docker_url|filename> [-p private_key.pem] [-v volume] args")
+        print(
+            "Usage: concil_run.py <docker_url|filename> [-p private_key.pem] [-v volume] args"
+        )
         return
     args = sys.argv[1:]
     if args[0] == "--debug":
@@ -38,17 +44,19 @@ def main():
         args = args[1:]
     else:
         logging.basicConfig(level=logging.WARNING)
-    
+
     filename = args[0]
-    if filename.startswith('docker://'):
+    if filename.startswith("docker://"):
         parts = parse_docker_url(filename)
         if "@" in parts.netloc:
             full_url = filename
         else:
-            username = os.environ.get('CONCIL_STORE_USER')
-            password = os.environ.get('CONCIL_STORE_PASSWORD')
+            username = os.environ.get("CONCIL_STORE_USER")
+            password = os.environ.get("CONCIL_STORE_PASSWORD")
             if username:
-                full_url = unsplit_url(parts.scheme, parts.netloc, parts.path, username, password)
+                full_url = unsplit_url(
+                    parts.scheme, parts.netloc, parts.path, username, password
+                )
             else:
                 full_url = filename
         store = Store(full_url)
@@ -58,5 +66,6 @@ def main():
     config.parse_args(args[1:])
     sys.exit(run(config))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

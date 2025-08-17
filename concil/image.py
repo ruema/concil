@@ -1,36 +1,40 @@
-import os
-import json
 import base64
 import gzip
-import shutil
 import io
+import json
+import os
+import shutil
 from hashlib import sha256, sha512
 from pathlib import Path
+
 import requests.exceptions
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
-from jwcrypto import jwk, jwe
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from jwcrypto import jwe, jwk
 from jwcrypto.common import base64url_encode
-from .store import IMAGE_CONVERTERS
-from .streams import MergedTarStream, GZipStream, DirTarStream
-from .dockerhub import DockerHub, DockerPath
+
 from . import oci_spec
+from .dockerhub import DockerHub, DockerPath
+from .store import IMAGE_CONVERTERS
+from .streams import DirTarStream, GZipStream, MergedTarStream
+
 
 class FormatError(Exception):
     pass
 
 
 def encode_base64(bytes):
-    return base64.encodebytes(bytes).strip().decode('ASCII')
+    return base64.encodebytes(bytes).strip().decode("ASCII")
+
 
 def calculate_digest(filename, unzip=False):
     hash = sha256()
-    with filename.open('rb') as input:
+    with filename.open("rb") as input:
         if unzip:
-            input = gzip.open(input, 'rb')
+            input = gzip.open(input, "rb")
         while True:
-            data = input.read(1024*1024)
+            data = input.read(1024 * 1024)
             if not data:
                 break
             hash.update(data)
@@ -43,6 +47,7 @@ DEFAULT_ALGS = {
     "RSA": "RSA-OAEP",
 }
 
+
 def encrypt(input_stream, encrypted_filename):
     backend = default_backend()
     symkey = os.urandom(32)
@@ -52,9 +57,9 @@ def encrypt(input_stream, encrypted_filename):
     hmac_hash = hmac.HMAC(symkey, hashes.SHA256(), backend=default_backend())
     sha_hash_encrypted = sha256()
     sha_hash_unencrypted = sha256()
-    with input_stream, encrypted_filename.open('wb') as output:
+    with input_stream, encrypted_filename.open("wb") as output:
         while True:
-            data = input_stream.read(1024*1024)
+            data = input_stream.read(1024 * 1024)
             if not data:
                 break
             sha_hash_unencrypted.update(data)
@@ -72,22 +77,26 @@ def encrypt(input_stream, encrypted_filename):
     pub_data = {
         "cipher": "AES_256_CTR_HMAC_SHA256",
         "hmac": encode_base64(hmac_hash),
-        "cipheroptions": {}
+        "cipheroptions": {},
     }
     payload = {
         "symkey": encode_base64(symkey),
         "digest": f"sha256:{sha_hash_unencrypted}",
-        "cipheroptions": {"nonce": encode_base64(nonce)}
+        "cipheroptions": {"nonce": encode_base64(nonce)},
     }
     return pub_data, payload, sha_hash_encrypted
-    
+
 
 class LayerDescriptor:
     def __init__(self, filename, media_type, digest, annotations=None, size=None):
         self.filename = filename
         self.media_type = media_type
         if digest is None:
-            digest = "dir:%s" % filename if media_type == "dir" else calculate_digest(filename)
+            digest = (
+                "dir:%s" % filename
+                if media_type == "dir"
+                else calculate_digest(filename)
+            )
         self.digest = digest
         self._unpacked_digest = None
         self._size = size
@@ -95,7 +104,7 @@ class LayerDescriptor:
         self.annotations = annotations if annotations is not None else {}
         self.converted_media_type = "tar+gzip" if media_type == "dir" else None
         self.encryption_keys = []
-        self.status = 'keep'
+        self.status = "keep"
 
     @property
     def size(self):
@@ -108,13 +117,13 @@ class LayerDescriptor:
     @property
     def unpacked_digest(self):
         if self._unpacked_digest is None:
-            if self.media_type == 'squashfs':
+            if self.media_type == "squashfs":
                 self._unpacked_digest = self.digest
-            elif self.media_type == 'tar':
+            elif self.media_type == "tar":
                 self._unpacked_digest = self.digest
-            elif self.media_type == 'tar+gzip':
+            elif self.media_type == "tar+gzip":
                 self._unpacked_digest = calculate_digest(self.filename, unzip=True)
-            elif self.media_type.endswith('+encrypted'):
+            elif self.media_type.endswith("+encrypted"):
                 self._unpacked_digest = self.digest
             elif self.media_type == "dir":
                 self._unpacked_digest = self.digest
@@ -137,36 +146,42 @@ class LayerDescriptor:
             result._unpacked_digest = digest
         result.data = data
         return result
-    
+
     def as_tar_stream(self):
-        if self.media_type == 'squashfs':
+        if self.media_type == "squashfs":
             raise NotImplementedError()
-        if self.media_type == 'dir':
-            return DirTarStream(self.filename.with_suffix(''))
+        if self.media_type == "dir":
+            return DirTarStream(self.filename.with_suffix(""))
         elif self.data:
             stream = io.BytesIO(self.data)
         else:
-            stream = self.filename.open('rb')
-        if self.media_type == 'tar':
+            stream = self.filename.open("rb")
+        if self.media_type == "tar":
             return stream
-        if self.media_type == 'tar+gzip':
-            return gzip.open(stream, 'rb')
+        if self.media_type == "tar+gzip":
+            return gzip.open(stream, "rb")
         raise NotImplementedError()
 
     def export(self, path, merge_with=None):
-        if self.converted_media_type is None and not self.encryption_keys and not merge_with:
-            output_filename = path / self.digest.split(':', 1)[1]
+        if (
+            self.converted_media_type is None
+            and not self.encryption_keys
+            and not merge_with
+        ):
+            output_filename = path / self.digest.split(":", 1)[1]
             if self.data:
                 input_stream = io.BytesIO(self.data)
             elif isinstance(self.filename, DockerPath):
-                input_stream = self.filename.open('rb')
+                input_stream = self.filename.open("rb")
             else:
                 try:
                     os.link(self.filename, output_filename)
                     print(f"Link {self.digest} ({self.media_type})")
-                    return type(self)(output_filename, self.media_type, self.digest, self.annotations)
+                    return type(self)(
+                        output_filename, self.media_type, self.digest, self.annotations
+                    )
                 except OSError as err:
-                    if err.errno == 18: # Invalid cross-device link:
+                    if err.errno == 18:  # Invalid cross-device link:
                         pass
                     else:
                         print(err)
@@ -174,33 +189,39 @@ class LayerDescriptor:
                     print(e)
                     # if anything goes wrong, try to copy
                     pass
-                input_stream = self.filename.open('rb')
+                input_stream = self.filename.open("rb")
             print(f"Copy {self.digest} ({self.media_type})")
-            with input_stream, output_filename.open('wb') as output:
+            with input_stream, output_filename.open("wb") as output:
                 shutil.copyfileobj(input_stream, output)
-            return type(self)(output_filename, self.media_type, self.digest, self.annotations)
+            return type(self)(
+                output_filename, self.media_type, self.digest, self.annotations
+            )
 
         media_type = self.converted_media_type or self.media_type
         temporary_file = None
         if merge_with:
-            input_stream = MergedTarStream([self.as_tar_stream()] + [m.as_tar_stream() for m in merge_with])
+            input_stream = MergedTarStream(
+                [self.as_tar_stream()] + [m.as_tar_stream() for m in merge_with]
+            )
         else:
             input_stream = self.as_tar_stream()
-        if media_type in ['tar+gzip', 'tar']:
-            if media_type == 'tar+gzip':
+        if media_type in ["tar+gzip", "tar"]:
+            if media_type == "tar+gzip":
                 input_stream = GZipStream(input_stream)
             if not self.encryption_keys:
                 print(f"Copy {self.digest} ({self.media_type})")
                 temp_filename = path / "temp"
-                with input_stream, temp_filename.open('wb') as output:
+                with input_stream, temp_filename.open("wb") as output:
                     shutil.copyfileobj(input_stream, output)
                 digest = calculate_digest(temp_filename)
-                output_filename = path / digest.split(':', 1)[1]
+                output_filename = path / digest.split(":", 1)[1]
                 temp_filename.rename(output_filename)
                 return type(self)(output_filename, media_type, digest, self.annotations)
         elif media_type == "squashfs":
-            print(f"Convert {self.digest}: {self.media_type} -> {self.converted_media_type}")
-            convert = IMAGE_CONVERTERS.get('tar')
+            print(
+                f"Convert {self.digest}: {self.media_type} -> {self.converted_media_type}"
+            )
+            convert = IMAGE_CONVERTERS.get("tar")
             if convert is None:
                 raise NotImplementedError()
             squash_filename = path / f"temporary.sq"
@@ -208,37 +229,50 @@ class LayerDescriptor:
             self._unpacked_digest = f"sha256:{diff_digest}"
             if not self.encryption_keys:
                 digest = calculate_digest(squash_filename)
-                output_filename = squash_filename.with_name(digest.split(':',1)[1])
+                output_filename = squash_filename.with_name(digest.split(":", 1)[1])
                 squash_filename.rename(output_filename)
-                return type(self)(output_filename, self.converted_media_type, digest, self.annotations)
+                return type(self)(
+                    output_filename, self.converted_media_type, digest, self.annotations
+                )
             else:
                 temporary_file = squash_filename
-                input_stream = squash_filename.open('rb')
+                input_stream = squash_filename.open("rb")
         else:
             raise NotImplementedError()
 
         assert self.encryption_keys
         print(f"Encrypt {self.digest}")
         encrypted_filename = path / "enc"
-        pub_data, payload, sha_hash_encrypted = encrypt(input_stream, encrypted_filename)
+        pub_data, payload, sha_hash_encrypted = encrypt(
+            input_stream, encrypted_filename
+        )
 
-        jwetoken = jwe.JWE(json.dumps(payload).encode('utf-8'),
+        jwetoken = jwe.JWE(
+            json.dumps(payload).encode("utf-8"),
             protected={"enc": "A256GCM"},
         )
         for key in self.encryption_keys:
             jwetoken.add_recipient(key, header={"alg": DEFAULT_ALGS[key.key_type]})
         enc = jwetoken.serialize()
-        annotations = dict(self.annotations, **{
-            "org.opencontainers.image.enc.keys.jwe": base64url_encode(enc),
-            "org.opencontainers.image.enc.pubopts": base64url_encode(json.dumps(pub_data)),
-        })
+        annotations = dict(
+            self.annotations,
+            **{
+                "org.opencontainers.image.enc.keys.jwe": base64url_encode(enc),
+                "org.opencontainers.image.enc.pubopts": base64url_encode(
+                    json.dumps(pub_data)
+                ),
+            },
+        )
         output_filename = path / sha_hash_encrypted
         encrypted_filename.rename(output_filename)
         if temporary_file is not None:
             temporary_file.unlink()
-        result = type(self)(output_filename, media_type + "+encrypted",
+        result = type(self)(
+            output_filename,
+            media_type + "+encrypted",
             f"sha256:{sha_hash_encrypted}",
-            annotations)
+            annotations,
+        )
         result._unpacked_digest = result.digest
         return result
 
@@ -252,7 +286,11 @@ class ImageManifest:
     def __init__(self, path, manifest_format=None):
         self.path = path
         self.schema_version = 2
-        self.manifest_format = manifest_format if manifest_format is not None else oci_spec.MANIFEST_DOCKER_MEDIA_TYPE
+        self.manifest_format = (
+            manifest_format
+            if manifest_format is not None
+            else oci_spec.MANIFEST_DOCKER_MEDIA_TYPE
+        )
         self.config = None
         self._configuration = None
         self.layers = []
@@ -260,34 +298,36 @@ class ImageManifest:
 
     @classmethod
     def _make_descriptor(cls, path, meta):
-        media_type = meta['mediaType']
+        media_type = meta["mediaType"]
         media_type = oci_spec.REVERSED_MEDIA_TYPES.get(media_type, media_type)
-        digest = meta['digest']
-        annotations = meta.get('annotations', {})
-        size = meta.get('size')
-        filename = path / digest.split(':', 1)[1]
+        digest = meta["digest"]
+        annotations = meta.get("annotations", {})
+        size = meta.get("size")
+        filename = path / digest.split(":", 1)[1]
         return LayerDescriptor(filename, media_type, digest, annotations, size)
 
     @classmethod
     def from_path(cls, path):
-        if path.startswith('docker://'):
+        if path.startswith("docker://"):
             hub = DockerHub(path)
-            manifest = hub.get_manifest(accept='application/vnd.docker.distribution.manifest.v2+json')
+            manifest = hub.get_manifest(
+                accept="application/vnd.docker.distribution.manifest.v2+json"
+            )
             manifest = json.loads(manifest)
             path = DockerPath(hub)
         else:
             path = Path(path)
             if (path / "index.json").exists():
-                with (path / "index.json").open('rb') as index:
+                with (path / "index.json").open("rb") as index:
                     index = json.load(index)
-                manifests = index.get('manifests', [])
+                manifests = index.get("manifests", [])
                 if len(manifests) != 1:
                     raise RuntimeError("unsupported")
-                manifest_file = Path(path, "blobs", *manifests[0]['digest'].split(':'))
+                manifest_file = Path(path, "blobs", *manifests[0]["digest"].split(":"))
                 path = manifest_file.parent
             else:
                 manifest_file = path / "manifest.json"
-            with manifest_file.open('rb') as manifest:
+            with manifest_file.open("rb") as manifest:
                 manifest = json.load(manifest)
         if manifest.get("schemaVersion") != 2:
             raise FormatError("unkown schema version")
@@ -295,10 +335,9 @@ class ImageManifest:
         result = cls(path, media_type)
         result.config = cls._make_descriptor(path, manifest["config"])
         result.layers = [
-            cls._make_descriptor(path, layer)
-            for layer in manifest["layers"]
+            cls._make_descriptor(path, layer) for layer in manifest["layers"]
         ]
-        result.annotations = manifest.get('annotations',{})
+        result.annotations = manifest.get("annotations", {})
         return result
 
     @property
@@ -317,33 +356,38 @@ class ImageManifest:
         digests = {}
         for layer in self.layers:
             digest = layer.unpacked_digest
-            if layer.status == 'remove':
+            if layer.status == "remove":
                 new_digest = None
             else:
-                if layer.status == 'merge':
+                if layer.status == "merge":
                     exported = layer.export(path, layer.merge_with)
                 else:
                     exported = layer.export(path)
                 new_digest = exported.unpacked_digest
                 export_layers.append(exported)
-                if layer.status == 'new':
+                if layer.status == "new":
                     new_diffs.append(new_digest)
             digests[digest] = new_digest
         config = self.configuration
-        config['rootfs']['diff_ids'] = [
+        config["rootfs"]["diff_ids"] = [
             digests[digest]
-            for digest in config['rootfs']['diff_ids']
+            for digest in config["rootfs"]["diff_ids"]
             if digests[digest] is not None
         ] + new_diffs
-        config = LayerDescriptor.from_data(json.dumps(config).encode('utf8'), "config")
-        manifest = oci_spec.manifest_to_dict(config.export(path), export_layers, manifest_format)
+        config = LayerDescriptor.from_data(json.dumps(config).encode("utf8"), "config")
+        manifest = oci_spec.manifest_to_dict(
+            config.export(path), export_layers, manifest_format
+        )
         with (path / "manifest.json").open("w", encoding="utf8") as output:
             json.dump(manifest, output)
         with (path / "version").open("w", encoding="utf8") as output:
             output.write(oci_spec.DIRECTORY_TRANSPORT)
 
-    def publish(self, docker_url, manifest_format=None, root_certificate=None, cosign_key=None):
+    def publish(
+        self, docker_url, manifest_format=None, root_certificate=None, cosign_key=None
+    ):
         from .store import Store
+
         store = Store(docker_url)
         if root_certificate is not None and store._notary is None:
             raise ValueError("notary not activated")
@@ -353,7 +397,7 @@ class ImageManifest:
         if manifest_format is None:
             manifest_format = self.manifest_format
         manifest = oci_spec.manifest_to_dict(self.config, self.layers, manifest_format)
-        
+
         hub = store._hub
         for layer in self.layers:
             if hub.has_blob(layer.digest):
@@ -378,9 +422,12 @@ class ImageManifest:
             raise
         sha256_digest = sha256(data).hexdigest()
         sha512_digest = sha512(data).hexdigest()
-        print(f"Manifest: {len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}")
+        print(
+            f"Manifest: {len(data)} --sha256 {sha256_digest} --sha512 {sha512_digest}"
+        )
         if store._notary is not None:
             from .notary import generate_hashes
+
             hashes = generate_hashes(data)
             store._notary.add_target_hashes(store.url.tag, hashes)
             try:

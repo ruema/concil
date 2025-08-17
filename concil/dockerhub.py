@@ -1,18 +1,21 @@
-import os
-import re
-import urllib
-import requests
 import base64
 import getpass
 import logging
+import os
+import re
+import urllib
+
+import requests
+
 logger = logging.getLogger(__file__)
 
 
 def base64url_encode(payload):
     if not isinstance(payload, bytes):
-        payload = payload.encode('utf-8')
+        payload = payload.encode("utf-8")
     encode = base64.urlsafe_b64encode(payload)
-    return encode.decode('utf-8') #.rstrip('=') Harbor don't like stripped base64
+    return encode.decode("utf-8")  # .rstrip('=') Harbor don't like stripped base64
+
 
 class DockerSplitResult(urllib.parse.SplitResult):
     __slots__ = ()
@@ -20,23 +23,25 @@ class DockerSplitResult(urllib.parse.SplitResult):
     @property
     def repository(self):
         repository, _, tag = self.path.partition(":")
-        return repository[1:] # strip /
+        return repository[1:]  # strip /
 
     @property
     def tag(self):
         repository, _, tag = self.path.partition(":")
         return tag or "latest"
-    
+
     @property
     def url(self):
-        if self.scheme not in ('https', 'http', 'docker', 'store'):
+        if self.scheme not in ("https", "http", "docker", "store"):
             raise ValueError("url must be a docker://-Url")
-        scheme = self.scheme if self.scheme == 'http' else 'https'
+        scheme = self.scheme if self.scheme == "http" else "https"
         if self.port:
             netloc = f"{self.hostname}:{self.port}"
         else:
             netloc = self.hostname
-        return urllib.parse.urlunsplit((scheme, netloc, 'v2/' + self.repository, '', ''))    
+        return urllib.parse.urlunsplit(
+            (scheme, netloc, "v2/" + self.repository, "", "")
+        )
 
 
 def parse_docker_url(docker_url):
@@ -51,7 +56,7 @@ class ResponseStream(object):
 
     def __enter__(self):
         return self
-    
+
     def __exit__(self, *args):
         self.close()
 
@@ -78,58 +83,63 @@ class DockerPath(object):
     def __init__(self, hub, digest=None):
         self.hub = hub
         self.digest = digest
-    
+
     def __truediv__(self, digest):
         return DockerPath(self.hub, digest)
 
     def read_bytes(self):
-        with self.hub.open_blob('sha256:' + self.digest) as file:
+        with self.hub.open_blob("sha256:" + self.digest) as file:
             return file.content
 
-    def open(self, mode='rb'):
-        if mode != 'rb':
+    def open(self, mode="rb"):
+        if mode != "rb":
             raise ValueError("mode have to be 'rb'")
-        return ResponseStream(self.hub.open_blob('sha256:' + self.digest))
+        return ResponseStream(self.hub.open_blob("sha256:" + self.digest))
 
 
 class DockerHub(object):
     def __init__(self, docker_url, verify=None):
         parts = parse_docker_url(docker_url)
-        self.username = urllib.parse.unquote_plus(parts.username) if parts.username else None
-        self.password = urllib.parse.unquote_plus(parts.password) if parts.password else None
+        self.username = (
+            urllib.parse.unquote_plus(parts.username) if parts.username else None
+        )
+        self.password = (
+            urllib.parse.unquote_plus(parts.password) if parts.password else None
+        )
         self.repository = parts.repository
         self.url = parts.url
         self.tag = parts.tag
         self.session = requests.Session()
         self.session.proxies = {"https": ""}
         self.session.verify = verify
-        self.session.headers['Docker-Distribution-Api-Version'] = 'registry/2.0'
+        self.session.headers["Docker-Distribution-Api-Version"] = "registry/2.0"
 
     def check_login(self, response):
         if response.status_code != 401:
             return True
         logger.debug(response.headers)
         self.session.headers.pop("authorization", None)
-        www_authenticate = response.headers['Www-Authenticate']
-        if not www_authenticate.startswith('Bearer'):
+        www_authenticate = response.headers["Www-Authenticate"]
+        if not www_authenticate.startswith("Bearer"):
             raise RuntimeError()
         params = dict(re.findall('([a-z]+)="([^"]*)"', www_authenticate))
         if not self.username:
             self.username = input("Username for storage:")
         if not self.password:
             self.password = getpass.getpass("Password for storage:")
-        auth = '%s:%s' % (self.username, self.password)
+        auth = "%s:%s" % (self.username, self.password)
         auth = base64url_encode(auth)
-        realm = params.pop('realm')
-        response2 = self.session.get(realm,
+        realm = params.pop("realm")
+        response2 = self.session.get(
+            realm,
             params=params,
-            headers={"Authorization": "Basic %s" % auth} if self.username else {}
+            headers={"Authorization": "Basic %s" % auth} if self.username else {},
         )
         response2.raise_for_status()
-        token = response2.json()['token']
+        token = response2.json()["token"]
         self.session.headers["Authorization"] = "Bearer " + token
         return False
-    
+
     def request(self, method, url, **kw):
         logger.info("%s %s", method, url)
         response = self.session.request(method, url, **kw)
@@ -143,36 +153,47 @@ class DockerHub(object):
     def post_blob(self, filename):
         self.session.cookies.clear()
         response = self.request("POST", self.url + "/blobs/uploads/")
-        location = response.headers['Location']
-        with open(filename, 'rb') as input:
+        location = response.headers["Location"]
+        with open(filename, "rb") as input:
             self.session.cookies.clear()
-            response = self.session.put(location,
+            response = self.session.put(
+                location,
                 params={"digest": "sha256:" + os.path.basename(filename)},
                 headers={"Content-Type": "application/octet-stream"},
-                data=input)
+                data=input,
+            )
         if response.status_code != 201:
             raise RuntimeError(response.text)
         return response
 
     def post_blob_data(self, data, digest):
-        """uploads the data with the given digest of format "sha256:1234...". """
+        """uploads the data with the given digest of format "sha256:1234..."."""
         self.session.cookies.clear()
         response = self.request("POST", self.url + "/blobs/uploads/")
-        location = response.headers['Location']
+        location = response.headers["Location"]
         self.session.cookies.clear()
-        response = self.session.put(location,
+        response = self.session.put(
+            location,
             params={"digest": digest},
             headers={"Content-Type": "application/octet-stream"},
-            data=data)
+            data=data,
+        )
         if response.status_code != 201:
             raise RuntimeError(response.text)
         return response
 
-    def post_manifest(self, data, tag=None, content_type="application/vnd.docker.distribution.manifest.v2+json"):
+    def post_manifest(
+        self,
+        data,
+        tag=None,
+        content_type="application/vnd.docker.distribution.manifest.v2+json",
+    ):
         self.session.cookies.clear()
         if tag is None:
             tag = self.tag
-        return self.request("PUT", self.url + "/manifests/" + tag,
+        return self.request(
+            "PUT",
+            self.url + "/manifests/" + tag,
             headers={"Content-Type": content_type},
             data=data,
         )
@@ -191,12 +212,18 @@ class DockerHub(object):
             raise
         return True
 
-    def open_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
+    def open_manifest(
+        self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"
+    ):
         headers = {"Accept": accept} if accept else {}
         tag = self.tag if not hash else hash
-        response = self.request("GET", self.url + "/manifests/" + tag, headers=headers, stream=True)
+        response = self.request(
+            "GET", self.url + "/manifests/" + tag, headers=headers, stream=True
+        )
         return response
 
-    def get_manifest(self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"):
+    def get_manifest(
+        self, hash=None, accept="application/vnd.docker.distribution.manifest.v1+json"
+    ):
         response = self.open_manifest(hash, accept)
         return response.content

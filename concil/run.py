@@ -1,19 +1,20 @@
 #!/usr/bin/python3
-import sys
-import os
-import time
-import json
-import subprocess
 import ctypes
 import ctypes.util
-import platform
-import threading
+import json
 import logging
+import os
+import platform
+import subprocess
+import sys
+import threading
+import time
 from tempfile import mkdtemp
+
 logger = logging.getLogger(__name__)
 
 PLATFORMS = {
-    'x86_64': 'amd64',
+    "x86_64": "amd64",
 }
 
 CLONE = 0x38
@@ -33,22 +34,38 @@ _PATH_PROC_GIDMAP = "/proc/self/gid_map"
 _PATH_PROC_SETGROUPS = "/proc/self/setgroups"
 
 libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-libc.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p)
+libc.mount.argtypes = (
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_ulong,
+    ctypes.c_char_p,
+)
 libc.chroot.argtypes = (ctypes.c_char_p,)
 libc.umount.argtypes = (ctypes.c_char_p,)
 libc.umount2.argtypes = (ctypes.c_char_p, ctypes.c_ulong)
-libc.unshare.argtypes = (ctypes.c_ulong, )
-libc.syscall.argtypes = (ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-libsquash = ctypes.CDLL(os.path.join(os.path.dirname(__file__), 'libsquash.so'))
+libc.unshare.argtypes = (ctypes.c_ulong,)
+libc.syscall.argtypes = (
+    ctypes.c_ulong,
+    ctypes.c_ulong,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+libsquash = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libsquash.so"))
 libsquash.squash_main.argtypes = (ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p))
 
+
 def setgroups_control(cmd):
-    with open(_PATH_PROC_SETGROUPS, 'w', encoding="ASCII") as fd:
+    with open(_PATH_PROC_SETGROUPS, "w", encoding="ASCII") as fd:
         fd.write(cmd)
 
+
 def map_id(filename, id_from, id_to):
-    with open(filename, "w", encoding='ASCII') as fd:
+    with open(filename, "w", encoding="ASCII") as fd:
         fd.write("{id_from} {id_to} 1".format(id_from=id_from, id_to=id_to))
+
 
 def clone(flags):
     """clone this process with new namespaces"""
@@ -62,6 +79,7 @@ def clone(flags):
     #        raise RuntimeError("unshare failed %s" % result)
     return pid
 
+
 def map_userid(real_euid, real_egid, user_id=0, group_id=0):
     setgroups_control("deny")
     map_id(_PATH_PROC_UIDMAP, user_id, real_euid)
@@ -69,28 +87,40 @@ def map_userid(real_euid, real_egid, user_id=0, group_id=0):
     libc.setresuid(user_id, user_id, user_id)
     libc.setresgid(group_id, group_id, group_id)
 
+
 def unmount(mount_path):
-    """ unmount the mount path"""
+    """unmount the mount path"""
     if libc.umount2(mount_path.encode(), 2):  # MNT_FORCE = 1 MNT_DETACH = 2
         logger.error("unmount failed: %s", ctypes.get_errno())
+
 
 def get_mount_point():
     try:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        return mkdtemp(prefix='concil.', dir=runtime)
+        return mkdtemp(prefix="concil.", dir=runtime)
     except OSError:
         # RUNTIME_DIR not specified
         # fall back to /tmp
         runtime = "/tmp"
-        return mkdtemp(prefix='concil.', dir=runtime)
+        return mkdtemp(prefix="concil.", dir=runtime)
+
 
 def mount_dir(mount_point, source, target, type, options):
     target_path = os.path.join(mount_point, target)
-    if libc.mount(source.encode(), target_path.encode(), None if not type else type.encode(), options, None):
+    if libc.mount(
+        source.encode(),
+        target_path.encode(),
+        None if not type else type.encode(),
+        options,
+        None,
+    ):
         # ignore error if source does not exist
         errno = ctypes.get_errno()
         if errno != 22:
-            raise RuntimeError("Mounting %s -> %s failed (%s)\n" % (source, target, errno))
+            raise RuntimeError(
+                "Mounting %s -> %s failed (%s)\n" % (source, target, errno)
+            )
+
 
 def wait_for_device(mount_point, device):
     for _ in range(1000):
@@ -99,32 +129,51 @@ def wait_for_device(mount_point, device):
         time.sleep(0.001)
     raise RuntimeError("mount failed")
 
+
 def mount_root(mount_point, layers):
     """mount a squash image"""
     device = os.stat(mount_point).st_dev
-    args = [b'squashfuse', b'-f'] + [l.encode() for l in reversed(layers)] + [mount_point.encode()]
+    args = (
+        [b"squashfuse", b"-f"]
+        + [l.encode() for l in reversed(layers)]
+        + [mount_point.encode()]
+    )
     args = (ctypes.c_char_p * len(args))(*args)
-    threading.Thread(target=libsquash.squash_main, args=(len(args), args), daemon=True).start()
+    threading.Thread(
+        target=libsquash.squash_main, args=(len(args), args), daemon=True
+    ).start()
     wait_for_device(mount_point, device)
+
 
 def mount_overlay(mount_point, overlay_work_dir, mount_point_root):
     device = os.stat(mount_point).st_dev
-    root = os.path.join(overlay_work_dir, 'root')
+    root = os.path.join(overlay_work_dir, "root")
     os.makedirs(root, exist_ok=True)
-    work = os.path.join(overlay_work_dir, 'work')
+    work = os.path.join(overlay_work_dir, "work")
     os.makedirs(work, exist_ok=True)
-    overlay_process = subprocess.Popen([
-        os.path.join(os.path.dirname(__file__), 'fuse-overlayfs'),
-        "-f", "-o",
-        f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
-        mount_point
-    ])
+    overlay_process = subprocess.Popen(
+        [
+            os.path.join(os.path.dirname(__file__), "fuse-overlayfs"),
+            "-f",
+            "-o",
+            f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
+            mount_point,
+        ]
+    )
     wait_for_device(mount_point, device)
     return overlay_process
 
+
 def mount_volumes(mount_point, cwd, volumes):
     for source_path, mount_path, flags in volumes:
-        mount_dir(mount_point, os.path.abspath(os.path.join(cwd, source_path)), mount_path, None, flags | MS_BIND | MS_REC)
+        mount_dir(
+            mount_point,
+            os.path.abspath(os.path.join(cwd, source_path)),
+            mount_path,
+            None,
+            flags | MS_BIND | MS_REC,
+        )
+
 
 STD_VOLUMES = [
     ("proc", "proc"),
@@ -134,6 +183,7 @@ STD_VOLUMES = [
     (None, "etc/hosts"),
     (None, "etc/resolv.conf"),
 ]
+
 
 def mount_std_volumes(mount_point):
     for fs_type, path in STD_VOLUMES:
@@ -148,12 +198,12 @@ def mount_std_volumes(mount_point):
 
 
 def read_environment_file(filename):
-    """ reads a file with key=value-pairs.
+    """reads a file with key=value-pairs.
     Returns a dict with the values."""
     result = {}
     with open(filename) as lines:
         for line in lines:
-            key, sep, value = line.strip().partition('=')
+            key, sep, value = line.strip().partition("=")
             if sep:
                 result[key] = value
     return result
@@ -169,22 +219,22 @@ class AbstractConfig:
         self.check_volumes = True
         self.volumes = []
         self.args = []
-    
+
     def parse_args(self, args):
         while args:
-            if args[0] in ('-e', '--env'):
+            if args[0] in ("-e", "--env"):
                 if len(args) <= 1:
                     break
-                key, sep, value = args[1].partition('=')
+                key, sep, value = args[1].partition("=")
                 if sep:
                     self.environment[key] = value
                 args = args[2:]
-            elif args[0] == '--env-file':
+            elif args[0] == "--env-file":
                 if len(args) <= 1:
                     break
                 self.environment.update(read_environment_file(args[1]))
                 args = args[2:]
-            elif args[0] in ('-p', '--private-key'):
+            elif args[0] in ("-p", "--private-key"):
                 if len(args) <= 1:
                     break
                 if self.private_key is not None:
@@ -192,12 +242,12 @@ class AbstractConfig:
                     return
                 self.private_key = args[1]
                 # --help --mount --tmpfs
-            elif args[0] in ('-v', '--volume'):
+            elif args[0] in ("-v", "--volume"):
                 if len(args) <= 1:
                     break
                 self.volumes.append(args[1])
                 args = args[2:]
-            elif args[0] == '--':
+            elif args[0] == "--":
                 args = args[1:]
                 break
             else:
@@ -205,13 +255,13 @@ class AbstractConfig:
         self.args = args
 
     def get_environment(self):
-        """ parses the Env configuration.
+        """parses the Env configuration.
         The environment variables are given in the from VAR=value.
         If no = is provided, the value is taken from the
         local environment.
         """
         environment = {}
-        for env in self.config.get('Env', []):
+        for env in self.config.get("Env", []):
             key, sep, value = env.partition("=")
             if not sep:
                 value = self.environment.get(key, "")
@@ -220,17 +270,17 @@ class AbstractConfig:
 
     def get_userid(self, etc_path=None):
         # user, uid, user:group, uid:gid, uid:group, user:gid
-        user = self.config.get('User') or "0:0"
-        user, _, group = user.partition(':')
+        user = self.config.get("User") or "0:0"
+        user, _, group = user.partition(":")
         return int(user), int(group)
 
     @property
     def working_dir(self):
-        return self.config.get('WorkingDir') or "/"
+        return self.config.get("WorkingDir") or "/"
 
     def build_commandline(self, args=None):
-        entrypoint = self.config.get('Entrypoint', [])
-        commandline = self.config.get('Cmd') or []
+        entrypoint = self.config.get("Entrypoint", [])
+        commandline = self.config.get("Cmd") or []
         if entrypoint:
             commandline = entrypoint + commandline
         if args:
@@ -241,85 +291,102 @@ class AbstractConfig:
 
     def get_key(self, layer):
         if self.private_key is None:
-            self.private_key = os.environ.get('CONCIL_ENCRYPTION_KEY')
+            self.private_key = os.environ.get("CONCIL_ENCRYPTION_KEY")
             if self.private_key is None:
                 raise RuntimeError("no private key given")
         import getpass
-        from jwcrypto import jwk, jwe
+
+        from jwcrypto import jwe, jwk
         from jwcrypto.common import base64url_decode, base64url_encode
+
         if isinstance(self.private_key, str):
-            with open(self.private_key, 'rb') as file:
+            with open(self.private_key, "rb") as file:
                 data = file.read()
             try:
                 self.private_key = jwk.JWK.from_pem(data)
             except TypeError:
-                passwd = os.environ.get('CONCIL_ENCRYPTION_PASSWORD')
+                passwd = os.environ.get("CONCIL_ENCRYPTION_PASSWORD")
                 if not passwd:
                     passwd = getpass.getpass("password for encryption key: ")
                 self.private_key = jwk.JWK.from_pem(data, passwd.encode())
-        enc = base64url_decode(layer["annotations"]["org.opencontainers.image.enc.keys.jwe"])
-        pub_data = json.loads(base64url_decode(layer["annotations"]["org.opencontainers.image.enc.pubopts"]))
+        enc = base64url_decode(
+            layer["annotations"]["org.opencontainers.image.enc.keys.jwe"]
+        )
+        pub_data = json.loads(
+            base64url_decode(
+                layer["annotations"]["org.opencontainers.image.enc.pubopts"]
+            )
+        )
         if pub_data["cipher"] != "AES_256_CTR_HMAC_SHA256":
             raise ValueError("unsupported cipher")
         jwetoken = jwe.JWE()
         jwetoken.deserialize(enc, key=self.private_key)
         payload = json.loads(jwetoken.payload)
-        return "AES_256_CTR,{},{}".format(payload['symkey'], payload["cipheroptions"]['nonce'])
+        return "AES_256_CTR,{},{}".format(
+            payload["symkey"], payload["cipheroptions"]["nonce"]
+        )
 
     def get_volumes(self):
-        defined_volumes = self.config.get('Volumes') or {}
+        defined_volumes = self.config.get("Volumes") or {}
         if not self.volumes:
             return []
         result = []
         for volume in self.volumes:
-            source_path, _, other = volume.partition(':')
-            mount_path, _, flags = other.partition(':')
-            flags = MS_RDONLY if 'ro' in flags.split(',') else 0
-            mount_path = mount_path.strip('/')
-            if self.check_volumes and '/' + mount_path not in defined_volumes:
+            source_path, _, other = volume.partition(":")
+            mount_path, _, flags = other.partition(":")
+            flags = MS_RDONLY if "ro" in flags.split(",") else 0
+            mount_path = mount_path.strip("/")
+            if self.check_volumes and "/" + mount_path not in defined_volumes:
                 raise RuntimeError("mount volume not defined")
             result.append((source_path, mount_path, flags))
         return result
-    
+
+
 class LocalConfig(AbstractConfig):
     def __init__(self, manifest_filename, private_key=None, environment=None):
         super().__init__(private_key, environment)
         if os.path.isdir(manifest_filename):
-            manifest_filename = os.path.join(manifest_filename, 'manifest.json')
+            manifest_filename = os.path.join(manifest_filename, "manifest.json")
         self.basepath = os.path.dirname(manifest_filename)
-        with open(manifest_filename, 'r', encoding='utf8') as file:
+        with open(manifest_filename, "r", encoding="utf8") as file:
             self.manifest = json.load(file)
-        config_filename = os.path.join(self.basepath, self.manifest['config']['digest'].split(':',1)[1])
-        with open(config_filename, 'r', encoding='utf8') as file:
+        config_filename = os.path.join(
+            self.basepath, self.manifest["config"]["digest"].split(":", 1)[1]
+        )
+        with open(config_filename, "r", encoding="utf8") as file:
             self.image_config = json.load(file)
-        self.config = self.image_config.get('config', {})
+        self.config = self.image_config.get("config", {})
 
     def get_layers(self):
         layers = {}
         for layer in self.manifest["layers"]:
             digest = layer["digest"]
-            filename = os.path.join(self.basepath, digest.split(':', 1)[1])
-            if layer["mediaType"] == "application/vnd.docker.image.rootfs.diff.squashfs+encrypted":
-                filename += ',' + self.get_key(layer)
-            elif layer["mediaType"] == "application/vnd.docker.image.rootfs.diff.squashfs":
+            filename = os.path.join(self.basepath, digest.split(":", 1)[1])
+            if (
+                layer["mediaType"]
+                == "application/vnd.docker.image.rootfs.diff.squashfs+encrypted"
+            ):
+                filename += "," + self.get_key(layer)
+            elif (
+                layer["mediaType"]
+                == "application/vnd.docker.image.rootfs.diff.squashfs"
+            ):
                 pass
             else:
                 raise RuntimeError(f"unsupported media type {layer['mediaType']}")
             layers[digest] = filename
-        return [layers[l]
-            for l in self.image_config['rootfs']['diff_ids']
-        ]
+        return [layers[l] for l in self.image_config["rootfs"]["diff_ids"]]
 
 
 def pivot_root(mount_point):
-    fd_oldroot = os.open('/', 0)
+    fd_oldroot = os.open("/", 0)
     os.chdir(mount_point)
 
     ret = libc.mount(None, b"/", None, MS_PRIVATE | MS_REC, None)
     if ret < 0:
         logger.error("remounting root")
         return ret
-    #ret = libc.mount(b".", b".", None, MS_BIND, None)
+    # ret = libc.mount(b".", b".", None, MS_BIND, None)
 
     # pivot_root into our new root fs
     ret = libc.pivot_root(".", ".")
@@ -362,19 +429,24 @@ def pivot_root(mount_point):
         return ret
     return 0
 
+
 def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None):
     cwd = os.getcwd()
     mount_root(mount_point, config.get_layers())
     if overlay_work_dir:
-        overlay_process = mount_overlay(mount_point2, os.path.abspath(os.path.join(cwd, overlay_work_dir)), mount_point)
+        overlay_process = mount_overlay(
+            mount_point2,
+            os.path.abspath(os.path.join(cwd, overlay_work_dir)),
+            mount_point,
+        )
         mount_point, mount_point2 = mount_point2, mount_point
     mount_volumes(mount_point, cwd, config.get_volumes())
-    pid = clone(CLONE_NEWPID|CLONE_NEWNS if overlay_work_dir else CLONE_NEWPID)
+    pid = clone(CLONE_NEWPID | CLONE_NEWNS if overlay_work_dir else CLONE_NEWPID)
     if pid == 0:
         mount_std_volumes(mount_point)
         commandline = config.build_commandline()
         environment = config.get_environment()
-        #if libc.chroot(mount_point.encode()):
+        # if libc.chroot(mount_point.encode()):
         if pivot_root(mount_point.encode()):
             raise RuntimeError("chroot failed: %s" % ctypes.get_errno())
         os.chdir(config.working_dir)
@@ -382,23 +454,30 @@ def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None
         raise RuntimeError("exec failed: %s" % ctypes.get_errno())
     pid, status = os.waitpid(pid, 0)
     if overlay_work_dir:
-        time.sleep(.1)
+        time.sleep(0.1)
         unmount(mount_point)
         overlay_process.wait()
-    if status & 0xff:
+    if status & 0xFF:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
 
+
 def run(config, overlay_work_dir=None):
-    if "architecture" in config.image_config and config.image_config["architecture"] != PLATFORMS[platform.machine()]:
+    if (
+        "architecture" in config.image_config
+        and config.image_config["architecture"] != PLATFORMS[platform.machine()]
+    ):
         raise RuntimeError("unsupported architecture")
-    if "os" in config.image_config and config.image_config["os"] != platform.system().lower():
+    if (
+        "os" in config.image_config
+        and config.image_config["os"] != platform.system().lower()
+    ):
         raise RuntimeError("unsupported os")
     real_euid = os.geteuid()
     real_egid = os.getegid()
     mount_point = get_mount_point()
     mount_point2 = get_mount_point() if overlay_work_dir else None
-    pid = clone(CLONE_NEWUSER|CLONE_NEWNS)
+    pid = clone(CLONE_NEWUSER | CLONE_NEWNS)
     if pid == 0:
         map_userid(real_euid, real_egid, *config.get_userid())
         status = run_child(config, mount_point, mount_point2, overlay_work_dir)
@@ -407,21 +486,23 @@ def run(config, overlay_work_dir=None):
     os.rmdir(mount_point)
     if mount_point2:
         os.rmdir(mount_point2)
-    if status & 0xff:
+    if status & 0xFF:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
+
 
 def join(pid, args):
     fd = libc.syscall(SYSCALL_PIDFD_OPEN, pid, 0, None, None, None)
     if fd < 0:
         logger.error("pidfd_open failed: %s", ctypes.get_errno())
         return
-    if libc.setns(fd, CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID) < 0:
+    if libc.setns(fd, CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID) < 0:
         logger.error("setns failed: %s", ctypes.get_errno())
         return
     os.chdir("/")
     commandline = args or ["/bin/sh"]
     os.execvpe(commandline[0], commandline, {})
+
 
 def main():
     if len(sys.argv) <= 1:
@@ -432,5 +513,6 @@ def main():
     config.parse_args(sys.args[2:])
     sys.exit(run(config))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

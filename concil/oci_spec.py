@@ -25,7 +25,7 @@ MEDIA_TYPES = {
         "tar+zstd+encrypted": "application/vnd.docker.image.rootfs.diff.tar.zstd+encrypted",
         "squashfs": "application/vnd.docker.image.rootfs.diff.squashfs",
         "squashfs+encrypted": "application/vnd.docker.image.rootfs.diff.squashfs+encrypted",
-    }
+    },
 }
 REVERSED_MEDIA_TYPES = {
     key: value for types in MEDIA_TYPES.values() for value, key in types.items()
@@ -47,7 +47,6 @@ class Descriptor:
         return result
 
 
-
 def descriptor_to_dict(descriptor, manifest_format=MANIFEST_OCI_MEDIA_TYPE):
     media_type = descriptor.media_type
     result = {
@@ -66,9 +65,8 @@ def manifest_to_dict(config, layers, manifest_format=MANIFEST_OCI_MEDIA_TYPE):
     }
     if manifest_format != MANIFEST_OCI_MEDIA_TYPE:
         manifest["mediaType"] = manifest_format
-    manifest['config'] = descriptor_to_dict(config, manifest_format)
-    manifest['layers'] = [
-        descriptor_to_dict(layer, manifest_format)
-        for layer in layers
+    manifest["config"] = descriptor_to_dict(config, manifest_format)
+    manifest["layers"] = [
+        descriptor_to_dict(layer, manifest_format) for layer in layers
     ]
     return manifest
