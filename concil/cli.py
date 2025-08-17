@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 import warnings
 from collections import Counter
@@ -264,7 +265,11 @@ def do_shell(args):
     config.check_volumes = False
     config.args = args.args
     config.volumes = args.volume
-    sys.exit(run(config, args.overlay_dir))
+    if args.overlay_dir:
+        overlay_dir = os.path.join(args.overlay_dir, "root")
+    else:
+        overlay_dir = args.overlay_path
+    sys.exit(run(config, overlay_dir))
 
 
 def do_publish(args):
@@ -426,7 +431,12 @@ def main():
 
     parser_shell = subparsers.add_parser("shell", help="start a shell in the container")
     parser_shell.add_argument("image", help="image directory")
-    parser_shell.add_argument("--overlay-dir", action="store", help="overlay directory")
+    parser_shell.add_argument(
+        "--overlay-dir", action="store", help="overlay directory (deprecated)"
+    )
+    parser_shell.add_argument(
+        "--overlay-path", action="store", help="overlay directory"
+    )
     parser_shell.add_argument("-v", "--volume", action="append", help="volumes")
     parser_shell.add_argument("args", nargs=argparse.REMAINDER)
 

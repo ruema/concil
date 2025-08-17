@@ -7,9 +7,9 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from tempfile import mkdtemp
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +97,12 @@ def unmount(mount_path):
 def get_mount_point():
     try:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        return mkdtemp(prefix="concil.", dir=runtime)
+        return tempfile.mkdtemp(prefix="concil.", dir=runtime)
     except OSError:
         # RUNTIME_DIR not specified
         # fall back to /tmp
         runtime = "/tmp"
-        return mkdtemp(prefix="concil.", dir=runtime)
+        return tempfile.mkdtemp(prefix="concil.", dir=runtime)
 
 
 def mount_dir(mount_point, source, target, type, options):
@@ -145,24 +145,30 @@ def mount_root(mount_point, layers):
     wait_for_device(mount_point, device)
 
 
-def mount_overlay(mount_point, overlay_work_dir, mount_point_root):
+def mount_overlay(mount_point, overlay_work_dir, mount_point_root, volumes=None):
     device = os.stat(mount_point).st_dev
-    root = os.path.join(overlay_work_dir, "root")
-    os.makedirs(root, exist_ok=True)
-    work = os.path.join(overlay_work_dir, "work")
-    os.makedirs(work, exist_ok=True)
+    os.makedirs(overlay_work_dir, exist_ok=True)
+    work = tempfile.TemporaryDirectory(
+        suffix=None, prefix=".wh..wh.", dir=overlay_work_dir
+    )
+    if volumes:
+        for _, mount_dir, _ in volumes:
+            os.makedirs(os.path.join(work.name, "volumes", mount_dir), exist_ok=True)
+        lowerdir = f"{mount_point_root}:{os.path.join(work.name, 'volumes')}"
+    else:
+        lowerdir = mount_point_root
     overlay_process = subprocess.Popen(
         [
             os.path.join(os.path.dirname(__file__), "fuse-overlayfs"),
             "-f",
             "-o",
-            f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
+            f"lowerdir={lowerdir},upperdir={overlay_work_dir},workdir={work.name}",
             mount_point,
         ],
         env={"FUSE_OVERLAYFS_DISABLE_OVL_WHITEOUT": "yes"},
     )
     wait_for_device(mount_point, device)
-    return overlay_process
+    return overlay_process, work
 
 
 def mount_volumes(mount_point, cwd, volumes):
@@ -440,15 +446,17 @@ def pivot_root(mount_point):
 
 def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None):
     cwd = os.getcwd()
+    volumes = config.get_volumes()
     mount_root(mount_point, config.get_layers())
     if overlay_work_dir:
-        overlay_process = mount_overlay(
+        overlay_process, temp_work = mount_overlay(
             mount_point2,
             os.path.abspath(os.path.join(cwd, overlay_work_dir)),
             mount_point,
+            volumes,
         )
         mount_point, mount_point2 = mount_point2, mount_point
-    mount_volumes(mount_point, cwd, config.get_volumes())
+    mount_volumes(mount_point, cwd, volumes)
     pid = clone(CLONE_NEWPID | CLONE_NEWNS if overlay_work_dir else CLONE_NEWPID)
     if pid == 0:
         mount_std_volumes(mount_point)
@@ -465,6 +473,7 @@ def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None
         time.sleep(0.1)
         unmount(mount_point)
         overlay_process.wait()
+        temp_work.cleanup()
     if status & 0xFF:
         raise RuntimeError("program ended with signal %x" % status)
     return status >> 8
