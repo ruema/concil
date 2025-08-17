@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 import warnings
 from collections import Counter
@@ -196,7 +197,12 @@ def do_copy(args):
             else:
                 print(f"{digest:65s} {layer.size:12d} {layer.media_type} kept.")
     if args.add_layer:
+        new_layers = []
         for filename in chain.from_iterable(args.add_layer):
+            if re.match("^\d+:", filename):
+                index, filename = filename.split(":", 1)
+            else:
+                index = None
             path = Path(filename)
             if path.suffix == ".sq":
                 media_type = "squashfs"
@@ -213,7 +219,12 @@ def do_copy(args):
             print(
                 f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type} added."
             )
-            image.layers.append(layer)
+            new_layers.append((index, layer))
+        for index, layer in reversed(new_layers):
+            if index is None:
+                image.layers.append(layer)
+            else:
+                image.layers.insert(int(index) - 1, layer)
     if args.squashfs:
         for layer in image.layers:
             layer.convert("squashfs")
