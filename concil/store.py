@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import subprocess
 import time
 import urllib.parse
@@ -127,7 +126,7 @@ CONFIG_PARAMS = {
     "cache_dir": "~/.concil",
     "cache_timeout": 604800,
     "disable_content_trust": False,
-    "content_trust": "notary",  # "cosign",#
+    "content_trust": "cosign",  # "notary"
     "remote_servers": {
         "docker.io": {
             "registry": "https://registry.hub.docker.com",
@@ -194,10 +193,10 @@ class ConcilConfig:
 
 def get_full_url(url, config):
     info = config.get_server_info(url.hostname)
-    registry_url = info.get("registry")
-    if registry_url is None:
-        registry_url = unsplit_url("https", url.netloc)
-    registry_url = parse_docker_url(registry_url)
+    if info is None or info.get("registry") is None:
+        registry_url = parse_docker_url(unsplit_url("https", url.netloc))
+    else:
+        registry_url = parse_docker_url(info.get("registry"))
     return unsplit_url(
         registry_url.scheme, registry_url.netloc, url.path, url.username, url.password
     )
@@ -205,15 +204,14 @@ def get_full_url(url, config):
 
 def get_notary_url(url, config):
     info = config.get_server_info(url.hostname)
-    notary_url = info.get("notary")
-    if notary_url is None:
-        registry_url = info.get("registry")
-        if registry_url is None:
-            registry_url = unsplit_url("https", url.netloc)
-        notary_url = parse_docker_url(registry_url)
+    if info is None or info.get("notary") is None:
+        if info.get("registry") is None:
+            notary_url = parse_docker_url(unsplit_url("https", url.netloc))
+        else:
+            notary_url = parse_docker_url(info.get("registry"))
         port = 4443
     else:
-        notary_url = parse_docker_url(notary_url)
+        notary_url = parse_docker_url(info.get("notary"))
         port = notary_url.port
     _, _, hostname = url.netloc.rpartition("@")
     hostname, _, _ = hostname.partition(":")

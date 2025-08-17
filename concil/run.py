@@ -158,7 +158,8 @@ def mount_overlay(mount_point, overlay_work_dir, mount_point_root):
             "-o",
             f"lowerdir={mount_point_root},upperdir={root},workdir={work}",
             mount_point,
-        ]
+        ],
+        env={"FUSE_OVERLAYFS_DISABLE_OVL_WHITEOUT": "yes"},
     )
     wait_for_device(mount_point, device)
     return overlay_process
@@ -178,6 +179,7 @@ def mount_volumes(mount_point, cwd, volumes):
 STD_VOLUMES = [
     ("proc", "proc"),
     (None, "dev"),
+    ("tmpfs", "dev/shm"),
     ("tmpfs", "tmp"),
     ("tmpfs", "run"),
     (None, "etc/hosts"),
@@ -215,7 +217,13 @@ class AbstractConfig:
         self.config = None
         self.image_config = None
         self.private_key = private_key
-        self.environment = dict(environment if environment is not None else os.environ)
+        if environment is None:
+            self.environment = dict(os.environ)
+        elif isinstance(environment, dict):
+            self.environment = dict(environment)
+        else:
+            self.environment = read_environment_file(environment)
+
         self.check_volumes = True
         self.volumes = []
         self.args = []
@@ -263,7 +271,7 @@ class AbstractConfig:
         environment = {}
         for env in self.config.get("Env", []):
             key, sep, value = env.partition("=")
-            if not sep:
+            if not sep or not value:
                 value = self.environment.get(key, "")
             environment[key] = value
         return environment
@@ -509,8 +517,8 @@ def main():
         print("Usage: run.py [config.json] [-p private_key.pem] [-v volume] args")
         return
     config_filename = sys.argv[1]
-    config = Config(config_filename)
-    config.parse_args(sys.args[2:])
+    config = LocalConfig(config_filename)
+    config.parse_args(sys.argv[2:])
     sys.exit(run(config))
 
 

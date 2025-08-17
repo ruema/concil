@@ -2,7 +2,6 @@
 The streams module provide different classes for stream processing
 various compression formats.
 """
-
 import gzip
 import os
 from pathlib import PurePosixPath
@@ -126,7 +125,7 @@ class GZipStream(_AbstractStream):
         _AbstractStream.__init__(self)
 
     def _process(self):
-        output = gzip.open(self._stream, "wb")
+        output = gzip.GzipFile(None, "wb", 9, self._stream, mtime=0)
         while True:
             buf = self._input_stream.read(10240)
             if not buf:
@@ -168,8 +167,8 @@ class DirTarStream(_AbstractStream):
         yield
 
     def iter_files(self, output, name, arcname):
-        """Add the file `name' to the archive. `name' may be any type of file
-        (directory, fifo, symbolic link, etc.). If given, `arcname'
+        """Add the file `name` to the archive. `name` may be any type of file
+        (directory, fifo, symbolic link, etc.). If given, `arcname`
         specifies an alternative name for the file in the archive.
         Directories are added recursively by default.
         """

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 from hashlib import sha256, sha512
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import requests.exceptions
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
 from jwcrypto import jwe, jwk
 from jwcrypto.common import base64url_encode
 
@@ -149,9 +151,12 @@ class LayerDescriptor:
 
     def as_tar_stream(self):
         if self.media_type == "squashfs":
-            raise NotImplementedError()
+            return subprocess.Popen(
+                [os.path.join(os.path.dirname(__file__), "sqfs2tar"), self.filename],
+                stdout=subprocess.PIPE,
+            ).stdout
         if self.media_type == "dir":
-            return DirTarStream(self.filename.with_suffix(""))
+            return DirTarStream(self.filename)
         elif self.data:
             stream = io.BytesIO(self.data)
         else:
@@ -311,7 +316,7 @@ class ImageManifest:
         if path.startswith("docker://"):
             hub = DockerHub(path)
             manifest = hub.get_manifest(
-                accept="application/vnd.docker.distribution.manifest.v2+json"
+                accept="application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
             )
             manifest = json.loads(manifest)
             path = DockerPath(hub)

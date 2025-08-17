@@ -238,6 +238,8 @@ def do_copy(args):
             else:
                 environment.append(f"{k}={v}")
         config["Env"] = environment
+    if args.user:
+        config["User"] = args.user
     if args.volumes:
         config["Volumes"] = {v: {} for vols in args.volumes for v in vols}
     if args.entrypoint is not None:
@@ -402,6 +404,7 @@ def main():
         action="append",
         help="filename of new layers appended",
     )
+    parser_copy.add_argument("--user", help="set user in container uid:gid")
     parser_copy.add_argument(
         "--env",
         metavar="env",

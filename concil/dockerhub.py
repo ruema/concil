@@ -147,7 +147,14 @@ class DockerHub(object):
         if not self.check_login(response):
             response = self.session.request(method, url, **kw)
             logger.debug(response.headers)
-        response.raise_for_status()
+        if response.status_code // 100 != 2:
+            try:
+                errors = response.json()['errors']
+                errors = "\n".join(error["code"] + ": " + error["message"] for error in errors)
+            except Exception:
+                response.raise_for_status()
+            else:
+                raise RuntimeError(f"Status: {response.status_code} Url: {url}\n{errors}")
         return response
 
     def post_blob(self, filename):
