@@ -44,42 +44,45 @@ def split_env(key_value):
     return (key_value, None)
 
 
-def find_digest(digests, short_digest):
-    """Looks up a short digest in the list of digests.
+def _find_digest(digests_to_title, short_digest_or_title):
+    """Looks up a short digest or title in the mapping digests to title.
 
     A digest has only to be given with it's first digits.
     This function checks if the short digests exists and
     is unambiguous.
 
     Args:
-        digests (list): list of digests
-        short_digest (str): the first digits of a digest
+        digests_to_title (mapping): mapping of digests to titles
+        short_digest_or_title (str): the first digits of a digest or a title
 
     Returns:
-        None if digest is not found or is ambiguous.
-        Otherwise a strings with the full digest.
+        a string with the full digest
+
+    Raises:
+        KeyError if the digest is not found or is ambiguous.
     """
-    found = [d for d in digests if d.startswith(short_digest)]
+    found = [
+        digest
+        for digest, title in digests_to_title.items()
+        if digest.startswith(short_digest_or_title) or short_digest_or_title == title
+    ]
     if len(found) != 1:
         if not found:
-            print(f"{short_digest} not found!")
+            print(f"{short_digest_or_title} not found!")
         else:
-            print(f"{short_digest} ambiguous: {', '.join(found)}!")
-        return None
+            print(f"{short_digest_or_title} ambiguous: {', '.join(found)}!")
+        raise KeyError(short_digest_or_title)
     return found[0]
 
 
-def resolve_one_digest(digests, short_digest):
+def _resolve_one_digest(digests_to_title, short_digest_or_title):
     """resolves a single short digests or a range of digests
     to a list of full digests"""
-    start_digest, sep, stop_digest = short_digest.partition("..")
+    start_digest, sep, stop_digest = short_digest_or_title.partition("..")
     if start_digest:
-        start_digest = find_digest(digests, start_digest)
+        start_digest = _find_digest(digests_to_title, short_digest_or_title)
     if stop_digest:
-        stop_digest = find_digest(digests, stop_digest)
-    if start_digest is None or stop_digest is None:
-        # an error was found
-        return None
+        stop_digest = _find_digest(digests_to_title, short_digest_or_title)
     if sep:
         # range of digests
         start_index = digests.index(start_digest) if start_digest else None
@@ -89,26 +92,31 @@ def resolve_one_digest(digests, short_digest):
         return [start_digest]
 
 
-def resolve_digests(digests, short_digests):
+def resolve_digests(digests_to_title, short_digests_or_titles):
     """resolves a list of short_digests into full digests
-    returns the list of list of digests and an error flag
+    returns the list of digests and an error flag
     """
-    digests = list(digests)
     result = []
     error = False
-    for inner_short_digests in short_digests or []:
-        inner_result = []
-        for short_digest in inner_short_digests:
-            resolved = resolve_one_digest(digests, short_digest)
-            if resolved is None:
-                error = True
-            else:
-                inner_result.extend(resolved)
-        result.append(inner_result)
+    for short_digest_or_title in chain.from_iterable(short_digests_or_titles or []):
+        try:
+            resolved = _resolve_one_digest(digests_to_title, short_digest_or_title)
+        except KeyError:
+            error = True
+        else:
+            result.extend(resolved)
     return result, error
 
 
 def guess_media_type(path):
+    """guess the media type of a file
+
+    Arguments:
+        path (Path): the path to the file
+
+    Returns:
+        str: the media type
+    """
     try:
         with path.open("rb") as file:
             data = file.read(1024)
@@ -194,21 +202,28 @@ def do_copy(args):
     keys = load_encryption_keys(args.encryption)
     image = ImageManifest.from_path(getattr(args, "source-image"))
     if args.remove_layer or args.merge_layers:
-        layers = {layer.digest.split(":", 1)[1]: layer for layer in image.layers}
-        to_be_removed, errors_remove = resolve_digests(layers, args.remove_layer)
-        to_be_merged, errors_merged = resolve_digests(layers, args.merge_layers)
+        digests_to_title = {
+            layer.digest.split(":", 1)[1]: layer.title for layer in image.layers
+        }
+        to_be_removed, errors_remove = resolve_digests(
+            digests_to_title, args.remove_layer
+        )
+        to_be_merged, errors_merged = resolve_digests(
+            digests_to_title, args.merge_layers
+        )
         counter = Counter()
-        counter.update(chain.from_iterable(to_be_removed))
-        counter.update(chain.from_iterable(to_be_merged))
+        counter.update(to_be_removed)
+        counter.update(to_be_merged)
         for digest, count in counter.items():
             if count > 1:
                 print(f"{digest} appears more than once")
                 errors_merged = True
         if errors_remove or errors_merged:
             return
-        to_be_removed = set(chain.from_iterable(to_be_removed))
-        all_to_be_merged = set(chain.from_iterable(to_be_merged))
+        to_be_removed = set(to_be_removed)
+        all_to_be_merged = set(to_be_merged)
         print(f"{'Digest':65s} {'Size':12s} Media-Type")
+        layers = {layer.digest.split(":", 1)[1]: layer for layer in image.layers}
         for layer in image.layers:
             digest = layer.digest.split(":", 1)[1]
             if digest in to_be_removed:
@@ -231,6 +246,14 @@ def do_copy(args):
                 index, filename = filename.split(":", 1)
             else:
                 index = None
+            if "=" in filename:
+                title, filename = filename.split("=", 1)
+                if (title[:1] == '"' and title[-1:] == '"') or (
+                    title[:1] == "'" and title[-1:] == "'"
+                ):
+                    title = title[1:-1]
+            else:
+                title = None
             path = Path(filename)
             if path.suffix == ".sq":
                 media_type = "squashfs"
@@ -246,6 +269,8 @@ def do_copy(args):
                     raise RuntimeError("unsupported file type")
             layer = LayerDescriptor(path, media_type, None)
             layer.status = "new"
+            if title is not None:
+                layer.title = title
             print(
                 f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type} added."
             )
