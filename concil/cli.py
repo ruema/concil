@@ -108,20 +108,48 @@ def resolve_digests(digests, short_digests):
     return result, error
 
 
+def guess_media_type(path):
+    try:
+        with path.open("rb") as file:
+            data = file.read(1024)
+            if data[:2] == b"\x1f\x8b":
+                import zlib
+
+                decompressor = zlib.decompressobj(15 + 32)
+                data = decompressor.decompress(data, 270)
+                if data[258:262] == b"ustar":
+                    return "tar+gzip"
+            if data[258:262] == b"ustar":
+                return "tar"
+            if data[:4] == b"hsqs":
+                return "squashfs"
+    except Exception:
+        pass
+    return None
+
+
 def do_list(args):
     import json
     import shlex
 
-    image = ImageManifest.from_path(args.image)
+    try:
+        image = ImageManifest.from_path(args.image)
+    except FileNotFoundError:
+        print(f"Image {args.image} not found")
+        return 1
+
     configuration = image.configuration
     for key in ["Created", "Author", "Architecture", "OS", "Variant"]:
         if key.lower() in configuration:
             print(f"{key}: {configuration[key.lower()]}")
 
     print()
-    print(f"{'Digest':65s} {'Size':12s} Media-Type")
+    print(f"{'Digest':65s} {'Size':12s} Media-Type Name")
     for layer in image.layers:
-        print(f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type}")
+        title = " " + layer.title if layer.title else ""
+        print(
+            f"{layer.digest.split(':',1)[1]:65s} {layer.size:12d} {layer.media_type:10}{title}"
+        )
 
     if args.config:
         print()
@@ -199,7 +227,7 @@ def do_copy(args):
     if args.add_layer:
         new_layers = []
         for filename in chain.from_iterable(args.add_layer):
-            if re.match("^\d+:", filename):
+            if re.match(r"^\d+:", filename):
                 index, filename = filename.split(":", 1)
             else:
                 index = None
@@ -213,7 +241,9 @@ def do_copy(args):
             elif path.is_dir():
                 media_type = "dir"
             else:
-                raise RuntimeError("unsupported file type")
+                media_type = guess_media_type(path)
+                if media_type is None:
+                    raise RuntimeError("unsupported file type")
             layer = LayerDescriptor(path, media_type, None)
             layer.status = "new"
             print(
@@ -280,7 +310,7 @@ def do_shell(args):
         overlay_dir = os.path.join(args.overlay_dir, "root")
     else:
         overlay_dir = args.overlay_path
-    sys.exit(run(config, overlay_dir))
+    return run(config, overlay_dir)
 
 
 def do_publish(args):
@@ -373,6 +403,15 @@ def do_config(args):
         do_config_cosign_import_key(config, args)
     else:
         assert False, "unknown command"
+
+
+COMMANDS = {
+    "list": do_list,
+    "copy": do_copy,
+    "shell": do_shell,
+    "publish": do_publish,
+    "config": do_config,
+}
 
 
 def main():
@@ -491,18 +530,12 @@ def main():
     parser_cosign_import_key.add_argument("filename", help="key filename")
 
     args = parser.parse_args()
-    if args.cmd == "list":
-        do_list(args)
-    elif args.cmd == "copy":
-        do_copy(args)
-    elif args.cmd == "shell":
-        do_shell(args)
-    elif args.cmd == "publish":
-        do_publish(args)
-    elif args.cmd == "config":
-        do_config(args)
-    else:
+    try:
+        do_cmd = COMMANDS[args.cmd]
+    except KeyError:
         parser.print_help()
+        sys.exit(1)
+    sys.exit(do_cmd(args))
 
 
 if __name__ == "__main__":

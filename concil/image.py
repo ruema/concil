@@ -12,7 +12,6 @@ import requests.exceptions
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 from jwcrypto import jwe, jwk
 from jwcrypto.common import base64url_encode
 
@@ -107,6 +106,14 @@ class LayerDescriptor:
         self.converted_media_type = "tar+gzip" if media_type == "dir" else None
         self.encryption_keys = []
         self.status = "keep"
+
+    @property
+    def title(self):
+        return self.annotations.get("org.opencontainers.image.title")
+
+    @title.setter
+    def title(self, value):
+        self.annotations["org.opencontainers.image.title"] = value
 
     @property
     def size(self):
