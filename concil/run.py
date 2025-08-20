@@ -11,11 +11,9 @@ import tempfile
 import threading
 import time
 
-logger = logging.getLogger(__name__)
+from .oci_spec import current_architecture
 
-PLATFORMS = {
-    "x86_64": "amd64",
-}
+logger = logging.getLogger(__name__)
 
 CLONE = 0x38
 SYSCALL_PIDFD_OPEN = 434
@@ -213,6 +211,10 @@ def read_environment_file(filename):
         for line in lines:
             key, sep, value = line.strip().partition("=")
             if sep:
+                if value[:1] == '"' and value[-1:] == '"':
+                    value = json.loads(value)
+                elif value[:1] == "'" and value[-1:] == "'":
+                    value = value[1:-1]
                 result[key] = value
     return result
 
@@ -482,7 +484,7 @@ def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None
 def run(config, overlay_work_dir=None):
     if (
         "architecture" in config.image_config
-        and config.image_config["architecture"] != PLATFORMS[platform.machine()]
+        and config.image_config["architecture"] != current_architecture()
     ):
         raise RuntimeError("unsupported architecture")
     if (

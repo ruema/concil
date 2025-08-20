@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import urllib.parse
-from base64 import b64decode, standard_b64encode
+from base64 import standard_b64encode
 from collections import OrderedDict
 from getpass import getpass
 from pathlib import Path
@@ -17,13 +17,19 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, padding
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import (
-    decode_dss_signature, encode_dss_signature)
+    decode_dss_signature,
+    encode_dss_signature,
+)
 from cryptography.hazmat.primitives.serialization import (
-    BestAvailableEncryption, Encoding, PrivateFormat, PublicFormat,
-    load_der_private_key, load_der_public_key)
-from cryptography.x509.oid import (ExtendedKeyUsageOID, NameOID,
-                                   SignatureAlgorithmOID)
-from jwcrypto.common import base64url_decode, base64url_encode
+    BestAvailableEncryption,
+    Encoding,
+    PrivateFormat,
+    PublicFormat,
+    load_der_private_key,
+    load_der_public_key,
+)
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID, SignatureAlgorithmOID
+from jwcrypto.common import base64url_decode
 
 from .dockerhub import DockerHub
 
@@ -336,8 +342,7 @@ def load_key(key):
         cert = x509.load_pem_x509_certificate(data, backend=default_backend())
         return cert.public_key()
     elif key["keytype"] == "ed25519":
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import \
-            Ed25519PublicKey
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
         return Ed25519PublicKey.from_public_bytes(data)
     else:
@@ -499,7 +504,7 @@ class Root(Metafile):
                 raise RuntimeError("no valid key-id")
         if "ca" in trust_pinning:
             cas = trust_pinning["ca"]
-            if repository in ca:
+            if repository in cas:
                 # TODO: implement ca validation
                 raise NotImplementedError()
         if trust_pinning.get("disable_tofu", False):

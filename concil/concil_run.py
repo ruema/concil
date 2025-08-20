@@ -5,7 +5,8 @@ import platform
 import sys
 
 from .dockerhub import parse_docker_url
-from .run import PLATFORMS, AbstractConfig, LocalConfig, run
+from .oci_spec import current_architecture
+from .run import AbstractConfig, LocalConfig, run
 from .store import Store, unsplit_url
 
 
@@ -14,7 +15,7 @@ class StoreConfig(AbstractConfig):
         super().__init__(private_key, environment)
         self.store = store
         self.manifest = store.get_manifest(
-            PLATFORMS[platform.machine()], platform.system().lower()
+            current_architecture(), platform.system().lower()
         )
         self.image_config = store.get_config(self.manifest["config"])
         self.config = self.image_config.get("config", {})

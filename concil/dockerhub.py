@@ -101,10 +101,14 @@ class DockerHub(object):
     def __init__(self, docker_url, verify=None):
         parts = parse_docker_url(docker_url)
         self.username = (
-            urllib.parse.unquote_plus(parts.username) if parts.username else None
+            urllib.parse.unquote_plus(parts.username)
+            if parts.username is not None
+            else None
         )
         self.password = (
-            urllib.parse.unquote_plus(parts.password) if parts.password else None
+            urllib.parse.unquote_plus(parts.password)
+            if parts.password is not None
+            else None
         )
         self.repository = parts.repository
         self.url = parts.url
@@ -123,9 +127,9 @@ class DockerHub(object):
         if not www_authenticate.startswith("Bearer"):
             raise RuntimeError()
         params = dict(re.findall('([a-z]+)="([^"]*)"', www_authenticate))
-        if not self.username:
+        if self.username is None:
             self.username = input("Username for storage:")
-        if not self.password:
+        if self.password is None:
             self.password = getpass.getpass("Password for storage:")
         auth = "%s:%s" % (self.username, self.password)
         auth = base64url_encode(auth)
@@ -149,12 +153,16 @@ class DockerHub(object):
             logger.debug(response.headers)
         if response.status_code // 100 != 2:
             try:
-                errors = response.json()['errors']
-                errors = "\n".join(error["code"] + ": " + error["message"] for error in errors)
+                errors = response.json()["errors"]
+                errors = "\n".join(
+                    error["code"] + ": " + error["message"] for error in errors
+                )
             except Exception:
                 response.raise_for_status()
             else:
-                raise RuntimeError(f"Status: {response.status_code} Url: {url}\n{errors}")
+                raise RuntimeError(
+                    f"Status: {response.status_code} Url: {url}\n{errors}"
+                )
         return response
 
     def post_blob(self, filename):

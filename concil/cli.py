@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import shlex
 import sys
 import warnings
 from collections import Counter
@@ -44,7 +45,19 @@ def split_env(key_value):
     return (key_value, None)
 
 
-def _find_digest(digests_to_title, short_digest_or_title):
+def split_title(filename):
+    if "=" in filename:
+        title, filename = filename.split("=", 1)
+        if (title[:1] == '"' and title[-1:] == '"') or (
+            title[:1] == "'" and title[-1:] == "'"
+        ):
+            title = title[1:-1]
+    else:
+        title = None
+    return title, filename
+
+
+def find_digest(digests_to_title, short_digest_or_title):
     """Looks up a short digest or title in the mapping digests to title.
 
     A digest has only to be given with it's first digits.
@@ -53,7 +66,7 @@ def _find_digest(digests_to_title, short_digest_or_title):
 
     Args:
         digests_to_title (mapping): mapping of digests to titles
-        short_digest_or_title (str): the first digits of a digest or a title
+        short_digest_or_title (str): the first digits of a digest or a title or index
 
     Returns:
         a string with the full digest
@@ -61,11 +74,15 @@ def _find_digest(digests_to_title, short_digest_or_title):
     Raises:
         KeyError if the digest is not found or is ambiguous.
     """
-    found = [
-        digest
-        for digest, title in digests_to_title.items()
-        if digest.startswith(short_digest_or_title) or short_digest_or_title == title
-    ]
+    if re.fullmatch(r"%\d+", short_digest_or_title):
+        found = [list(digests_to_title)[int(short_digest_or_title[1:]) - 1]]
+    else:
+        found = [
+            digest
+            for digest, title in digests_to_title.items()
+            if digest.startswith(short_digest_or_title)
+            or short_digest_or_title == title
+        ]
     if len(found) != 1:
         if not found:
             print(f"{short_digest_or_title} not found!")
@@ -78,18 +95,20 @@ def _find_digest(digests_to_title, short_digest_or_title):
 def _resolve_one_digest(digests_to_title, short_digest_or_title):
     """resolves a single short digests or a range of digests
     to a list of full digests"""
+    title, short_digest_or_title = split_title(short_digest_or_title)
     start_digest, sep, stop_digest = short_digest_or_title.partition("..")
     if start_digest:
-        start_digest = _find_digest(digests_to_title, short_digest_or_title)
+        start_digest = find_digest(digests_to_title, short_digest_or_title)
     if stop_digest:
-        stop_digest = _find_digest(digests_to_title, short_digest_or_title)
+        stop_digest = find_digest(digests_to_title, short_digest_or_title)
     if sep:
         # range of digests
+        digests = list(digests_to_title)
         start_index = digests.index(start_digest) if start_digest else None
         stop_index = digests.index(stop_digest) + 1 if stop_digest else None
-        return digests[start_index:stop_index]
+        return [(title, digest) for digest in digests[start_index:stop_index]]
     else:
-        return [start_digest]
+        return [(title, start_digest)]
 
 
 def resolve_digests(digests_to_title, short_digests_or_titles):
@@ -98,13 +117,16 @@ def resolve_digests(digests_to_title, short_digests_or_titles):
     """
     result = []
     error = False
-    for short_digest_or_title in chain.from_iterable(short_digests_or_titles or []):
-        try:
-            resolved = _resolve_one_digest(digests_to_title, short_digest_or_title)
-        except KeyError:
-            error = True
-        else:
-            result.extend(resolved)
+    for inner_short_digests_or_titles in short_digests_or_titles or []:
+        inner_result = []
+        for short_digest_or_title in inner_short_digests_or_titles:
+            try:
+                resolved = _resolve_one_digest(digests_to_title, short_digest_or_title)
+            except KeyError:
+                error = True
+            else:
+                inner_result.extend(resolved)
+        result.append(inner_result)
     return result, error
 
 
@@ -137,14 +159,22 @@ def guess_media_type(path):
 
 
 def do_list(args):
-    import json
-    import shlex
-
     try:
         image = ImageManifest.from_path(args.image)
     except FileNotFoundError:
         print(f"Image {args.image} not found")
         return 1
+
+    if args.print_layer:
+        if args.config or args.history:
+            print("You cannot use --print-layer with --config or --history")
+            return 1
+        digests_to_title = {
+            layer.digest.split(":", 1)[1]: layer.title for layer in image.layers
+        }
+        digest = find_digest(digests_to_title, args.print_layer)
+        print(digest)
+        return
 
     configuration = image.configuration
     for key in ["Created", "Author", "Architecture", "OS", "Variant"]:
@@ -211,17 +241,17 @@ def do_copy(args):
         to_be_merged, errors_merged = resolve_digests(
             digests_to_title, args.merge_layers
         )
+        to_be_removed = [d for digests in to_be_removed for _, d in digests]
+        all_to_be_merged = [d for digests in to_be_merged for _, d in digests]
         counter = Counter()
         counter.update(to_be_removed)
-        counter.update(to_be_merged)
+        counter.update(all_to_be_merged)
         for digest, count in counter.items():
             if count > 1:
                 print(f"{digest} appears more than once")
                 errors_merged = True
         if errors_remove or errors_merged:
             return
-        to_be_removed = set(to_be_removed)
-        all_to_be_merged = set(to_be_merged)
         print(f"{'Digest':65s} {'Size':12s} Media-Type")
         layers = {layer.digest.split(":", 1)[1]: layer for layer in image.layers}
         for layer in image.layers:
@@ -230,11 +260,16 @@ def do_copy(args):
                 print(f"{digest:65s} {layer.size:12d} {layer.media_type} removed.")
                 layer.status = "remove"
             elif digest in all_to_be_merged:
-                print(f"{digest:65s} {layer.size:12d} {layer.media_type} merged.")
-                others = next(m for m in to_be_merged if digest in m)
-                if digest == others[0]:
+                others = next(m for m in to_be_merged if digest in [d for _, d in m])
+                title = others[0][0]
+                if title:
+                    layer.title = title
+                if len(others) == 1:
+                    pass
+                elif digest == others[0]:
+                    print(f"{digest:65s} {layer.size:12d} {layer.media_type} merged.")
                     layer.status = "merge"
-                    layer.merge_with = [layers[d] for d in others[1:]]
+                    layer.merge_with = [layers[d] for _, d in others[1:]]
                 else:
                     layer.status = "remove"
             else:
@@ -246,16 +281,9 @@ def do_copy(args):
                 index, filename = filename.split(":", 1)
             else:
                 index = None
-            if "=" in filename:
-                title, filename = filename.split("=", 1)
-                if (title[:1] == '"' and title[-1:] == '"') or (
-                    title[:1] == "'" and title[-1:] == "'"
-                ):
-                    title = title[1:-1]
-            else:
-                title = None
+            title, filename = split_title(filename)
             path = Path(filename)
-            if path.suffix == ".sq":
+            if path.suffix in (".sq", ".sqfs", ".sfs"):
                 media_type = "squashfs"
             elif path.suffix == ".tar":
                 media_type = "tar"
@@ -325,7 +353,14 @@ def do_copy(args):
 def do_shell(args):
     from .run import LocalConfig, run
 
-    config = LocalConfig(args.image)
+    class ExtraConfig(LocalConfig):
+        def get_layers(self):
+            layers = super().get_layers()
+            if args.extra_layer:
+                layers.extend(chain.from_iterable(args.extra_layer))
+            return layers
+
+    config = ExtraConfig(args.image)
     config.config["Entrypoint"] = ["/bin/sh"]
     config.config["Cmd"] = []
     config.check_volumes = False
@@ -375,7 +410,7 @@ def do_config_cosign_generate_key(config, args):
 def do_config_cosign_list_keys(config, args):
     cosign_path = config.cosign_path
     if not cosign_path.is_dir():
-        print(f"no keys found")
+        print("no keys found")
         return
     public_keys = {path.stem for path in cosign_path.glob("*.pub")}
     private_keys = {path.stem for path in cosign_path.glob("*.key")}
@@ -442,12 +477,27 @@ COMMANDS = {
 def main():
     warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
     store.TAR2SQFS[-1] = "level=19"
-    parser = argparse.ArgumentParser(description="Convert container images.")
+    parser = argparse.ArgumentParser(
+        description="Convert container images.",
+        epilog="Examples:\n"
+        "    Download image from docker hub:\n"
+        "    concil copy --squashfs docker://:@registry.hub.docker.com/library/ubuntu:22.04 image/ubuntu_22.04\n"
+        "\n"
+        "    Install additional packages:\n"
+        "    concil shell --overlay-path overlay --extra-layer fakeroot.sqfs -- image/ubuntu_22.04 /usr/bin/fakeroot apt-get install python\n"
+        "\n"
+        "    Make a new container image:\n"
+        "    concil copy --add-layer python=overlay --squashfs image/ubuntu_22.04 image/python\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(help="sub-command help", dest="cmd")
     parser_list = subparsers.add_parser("list", help="list layers of image")
     parser_list.add_argument("image", help="image directory")
     parser_list.add_argument("--config", action="store_true", help="show config")
     parser_list.add_argument("--history", action="store_true", help="show history")
+    parser_list.add_argument(
+        "--print-layer", metavar="layer", action="store", help="print hash of layer"
+    )
 
     parser_copy = subparsers.add_parser("copy", help="modify the layers of image")
     parser_copy.add_argument("source-image", help="source directory")
@@ -511,6 +561,13 @@ def main():
     )
     parser_shell.add_argument(
         "--overlay-path", action="store", help="overlay directory"
+    )
+    parser_shell.add_argument(
+        "--extra-layer",
+        metavar="layer",
+        nargs="+",
+        action="append",
+        help="filename of an extra layer",
     )
     parser_shell.add_argument("-v", "--volume", action="append", help="volumes")
     parser_shell.add_argument("args", nargs=argparse.REMAINDER)

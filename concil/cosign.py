@@ -11,8 +11,13 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import (
-    BestAvailableEncryption, Encoding, PrivateFormat, PublicFormat,
-    load_pem_private_key, load_pem_public_key)
+    BestAvailableEncryption,
+    Encoding,
+    PrivateFormat,
+    PublicFormat,
+    load_pem_private_key,
+    load_pem_public_key,
+)
 
 from . import oci_spec
 

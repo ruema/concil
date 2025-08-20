@@ -2,6 +2,7 @@
 The streams module provide different classes for stream processing
 various compression formats.
 """
+
 import gzip
 import os
 from pathlib import PurePosixPath

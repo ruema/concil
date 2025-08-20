@@ -1,3 +1,4 @@
+import platform
 from hashlib import sha256
 
 DIRECTORY_TRANSPORT = "Directory Transport Version: 1.1\n"
@@ -30,6 +31,14 @@ MEDIA_TYPES = {
 REVERSED_MEDIA_TYPES = {
     key: value for types in MEDIA_TYPES.values() for value, key in types.items()
 }
+
+PLATFORMS_TO_ARCHITECTURE = {
+    "x86_64": "amd64",
+}
+
+
+def current_architecture():
+    return PLATFORMS_TO_ARCHITECTURE[platform.machine()]
 
 
 class Descriptor:

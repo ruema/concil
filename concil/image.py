@@ -344,6 +344,19 @@ class ImageManifest:
         if manifest.get("schemaVersion") != 2:
             raise FormatError("unkown schema version")
         media_type = manifest.get("mediaType", oci_spec.MANIFEST_OCI_MEDIA_TYPE)
+
+        if media_type == "application/vnd.oci.image.index.v1+json":
+            # find the correct manifest in index
+            for manifest in manifest["manifests"]:
+                if (
+                    manifest["platform"]["architecture"]
+                    == oci_spec.current_architecture()
+                ):
+                    break
+            else:
+                raise ValueError("no supported architecture found.")
+            manifest = json.loads(hub.open_blob(manifest["digest"]).content)
+
         result = cls(path, media_type)
         result.config = cls._make_descriptor(path, manifest["config"])
         result.layers = [
