@@ -98,9 +98,9 @@ def _resolve_one_digest(digests_to_title, short_digest_or_title):
     title, short_digest_or_title = split_title(short_digest_or_title)
     start_digest, sep, stop_digest = short_digest_or_title.partition("..")
     if start_digest:
-        start_digest = find_digest(digests_to_title, short_digest_or_title)
+        start_digest = find_digest(digests_to_title, start_digest)
     if stop_digest:
-        stop_digest = find_digest(digests_to_title, short_digest_or_title)
+        stop_digest = find_digest(digests_to_title, stop_digest)
     if sep:
         # range of digests
         digests = list(digests_to_title)
