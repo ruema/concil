@@ -16,6 +16,12 @@ from .image import ImageManifest, LayerDescriptor
 
 
 def generate_key(outputfilename, password):
+    """Generates a new private key.
+
+    Args:
+        outputfilename (str): The base name for the output key files.
+        password (str): The password to encrypt the private key.
+    """
     from jwcrypto import jwk
 
     key = jwk.JWK.generate(kty="EC", crv="P-521")
@@ -27,6 +33,14 @@ def generate_key(outputfilename, password):
 
 
 def load_encryption_keys(filenames):
+    """Loads encryption keys from files.
+
+    Args:
+        filenames (list of list of str): A list of lists of key filenames.
+
+    Returns:
+        list: A list of loaded JWK keys.
+    """
     from jwcrypto import jwk
 
     keys = []
@@ -37,8 +51,15 @@ def load_encryption_keys(filenames):
 
 
 def split_env(key_value):
-    """splits a environment key=value into key and value.
-    If only key is given, return (key, None)
+    """Splits an environment variable string into a key-value pair.
+
+    If only a key is given, the value is None.
+
+    Args:
+        key_value (str): The environment variable string (e.g., "KEY=VALUE").
+
+    Returns:
+        tuple: A tuple of (key, value).
     """
     if "=" in key_value:
         return key_value.split("=", 1)
@@ -60,19 +81,18 @@ def split_title(filename):
 def find_digest(digests_to_title, short_digest_or_title):
     """Looks up a short digest or title in the mapping digests to title.
 
-    A digest has only to be given with it's first digits.
-    This function checks if the short digests exists and
-    is unambiguous.
+    A digest has to be given with only its first digits.
+    This function checks if the short digest exists and is unambiguous.
 
     Args:
-        digests_to_title (mapping): mapping of digests to titles
-        short_digest_or_title (str): the first digits of a digest or a title or index
+        digests_to_title (mapping): A mapping of digests to titles.
+        short_digest_or_title (str): The first digits of a digest or a title.
 
     Returns:
-        a string with the full digest
+        str: The full digest.
 
     Raises:
-        KeyError if the digest is not found or is ambiguous.
+        KeyError: If the digest is not found or is ambiguous.
     """
     if re.fullmatch(r"%\d+", short_digest_or_title):
         found = [list(digests_to_title)[int(short_digest_or_title[1:]) - 1]]
@@ -112,8 +132,15 @@ def _resolve_one_digest(digests_to_title, short_digest_or_title):
 
 
 def resolve_digests(digests_to_title, short_digests_or_titles):
-    """resolves a list of short_digests into full digests
-    returns the list of digests and an error flag
+    """Resolves a list of short digests into full digests.
+
+    Args:
+        digests_to_title (mapping): A mapping of digests to titles.
+        short_digests_or_titles (list of list of str): A list of lists of
+            short digests or titles.
+
+    Returns:
+        tuple: A tuple containing the list of resolved digests and an error flag.
     """
     result = []
     error = False
@@ -131,13 +158,14 @@ def resolve_digests(digests_to_title, short_digests_or_titles):
 
 
 def guess_media_type(path):
-    """guess the media type of a file
+    """Guesses the media type of a file.
 
-    Arguments:
-        path (Path): the path to the file
+    Args:
+        path (Path): The path to the file.
 
     Returns:
-        str: the media type
+        str or None: The guessed media type, or None if it cannot be
+            determined.
     """
     try:
         with path.open("rb") as file:
@@ -159,6 +187,17 @@ def guess_media_type(path):
 
 
 def do_list(args):
+    """Handles the 'list' command.
+
+    Args:
+        args: The command-line arguments.
+
+    Returns:
+        int: 0 on success, 1 on failure.
+    """
+    import json
+    import shlex
+
     try:
         image = ImageManifest.from_path(args.image)
     except FileNotFoundError:
@@ -229,6 +268,11 @@ def do_list(args):
 
 
 def do_copy(args):
+    """Handles the 'copy' command.
+
+    Args:
+        args: The command-line arguments.
+    """
     keys = load_encryption_keys(args.encryption)
     image = ImageManifest.from_path(getattr(args, "source-image"))
     if args.remove_layer or args.merge_layers:
@@ -351,6 +395,14 @@ def do_copy(args):
 
 
 def do_shell(args):
+    """Handles the 'shell' command.
+
+    Args:
+        args: The command-line arguments.
+
+    Returns:
+        int: The exit code of the shell process.
+    """
     from .run import LocalConfig, run
 
     class ExtraConfig(LocalConfig):
@@ -374,6 +426,11 @@ def do_shell(args):
 
 
 def do_publish(args):
+    """Handles the 'publish' command.
+
+    Args:
+        args: The command-line arguments.
+    """
     image = ImageManifest.from_path(args.image)
     image.publish(
         getattr(args, "docker-url"),
@@ -384,6 +441,14 @@ def do_publish(args):
 
 
 def store_concil_key(cosign_path, key_id, key, password):
+    """Stores a cosign key.
+
+    Args:
+        cosign_path (Path): The path to the cosign directory.
+        key_id (str): The ID of the key.
+        key (jwk.JWK): The key object.
+        password (str): The password for the private key.
+    """
     cosign_path.mkdir(parents=True, exist_ok=True)
     if key.has_private:
         print(f"Private key written to {key_id}.key")
@@ -395,6 +460,12 @@ def store_concil_key(cosign_path, key_id, key, password):
 
 
 def do_config_cosign_generate_key(config, args):
+    """Handles the 'config cosign-generate-key' command.
+
+    Args:
+        config: The concil configuration.
+        args: The command-line arguments.
+    """
     from jwcrypto import jwk
 
     key_id = getattr(args, "key-id")
@@ -408,6 +479,12 @@ def do_config_cosign_generate_key(config, args):
 
 
 def do_config_cosign_list_keys(config, args):
+    """Handles the 'config cosign-list-keys' command.
+
+    Args:
+        config: The concil configuration.
+        args: The command-line arguments.
+    """
     cosign_path = config.cosign_path
     if not cosign_path.is_dir():
         print("no keys found")
@@ -424,6 +501,12 @@ def do_config_cosign_list_keys(config, args):
 
 
 def do_config_cosign_export_key(config, args):
+    """Handles the 'config cosign-export-key' command.
+
+    Args:
+        config: The concil configuration.
+        args: The command-line arguments.
+    """
     cosign_path = config.cosign_path
     key_id = getattr(args, "key-id")
     if args.private:
@@ -438,6 +521,12 @@ def do_config_cosign_export_key(config, args):
 
 
 def do_config_cosign_import_key(config, args):
+    """Handles the 'config cosign-import-key' command.
+
+    Args:
+        config: The concil configuration.
+        args: The command-line arguments.
+    """
     from jwcrypto import jwk
 
     key_id = getattr(args, "key-id")
@@ -452,6 +541,11 @@ def do_config_cosign_import_key(config, args):
 
 
 def do_config(args):
+    """Handles the 'config' command.
+
+    Args:
+        args: The command-line arguments.
+    """
     config = store.ConcilConfig()
     if args.config_cmd == "cosign-list-keys":
         do_config_cosign_list_keys(config, args)
@@ -475,6 +569,7 @@ COMMANDS = {
 
 
 def main():
+    """The main entry point for the concil CLI."""
     warnings.simplefilter("default", urllib3.exceptions.SecurityWarning)
     store.TAR2SQFS[-1] = "level=19"
     parser = argparse.ArgumentParser(

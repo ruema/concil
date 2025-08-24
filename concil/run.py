@@ -56,17 +56,36 @@ libsquash.squash_main.argtypes = (ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p
 
 
 def setgroups_control(cmd):
+    """Writes a command to /proc/self/setgroups.
+
+    Args:
+        cmd (str): The command to write ('allow' or 'deny').
+    """
     with open(_PATH_PROC_SETGROUPS, "w", encoding="ASCII") as fd:
         fd.write(cmd)
 
 
 def map_id(filename, id_from, id_to):
+    """Writes an ID mapping to a file.
+
+    Args:
+        filename (str): The path to the mapping file (e.g., /proc/self/uid_map).
+        id_from (int): The starting ID in the new namespace.
+        id_to (int): The starting ID in the parent namespace.
+    """
     with open(filename, "w", encoding="ASCII") as fd:
         fd.write("{id_from} {id_to} 1".format(id_from=id_from, id_to=id_to))
 
 
 def clone(flags):
-    """clone this process with new namespaces"""
+    """Clones the current process with new namespaces.
+
+    Args:
+        flags (int): The clone flags.
+
+    Returns:
+        int: The process ID of the new child process.
+    """
     pid = libc.syscall(CLONE, SIGCHLD | flags, None, None, None, None)
     if pid < 0:
         raise RuntimeError("clone failed %s" % ctypes.get_errno())
@@ -79,6 +98,16 @@ def clone(flags):
 
 
 def map_userid(real_euid, real_egid, user_id=0, group_id=0):
+    """Maps the user and group IDs in a new user namespace.
+
+    Args:
+        real_euid (int): The effective user ID in the parent namespace.
+        real_egid (int): The effective group ID in the parent namespace.
+        user_id (int, optional): The user ID in the new namespace.
+            Defaults to 0.
+        group_id (int, optional): The group ID in the new namespace.
+            Defaults to 0.
+    """
     setgroups_control("deny")
     map_id(_PATH_PROC_UIDMAP, user_id, real_euid)
     map_id(_PATH_PROC_GIDMAP, group_id, real_egid)
@@ -87,12 +116,21 @@ def map_userid(real_euid, real_egid, user_id=0, group_id=0):
 
 
 def unmount(mount_path):
-    """unmount the mount path"""
+    """Unmounts a filesystem.
+
+    Args:
+        mount_path (str): The path to the mount point.
+    """
     if libc.umount2(mount_path.encode(), 2):  # MNT_FORCE = 1 MNT_DETACH = 2
         logger.error("unmount failed: %s", ctypes.get_errno())
 
 
 def get_mount_point():
+    """Gets a temporary directory to use as a mount point.
+
+    Returns:
+        str: The path to the mount point.
+    """
     try:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
         return tempfile.mkdtemp(prefix="concil.", dir=runtime)
@@ -104,6 +142,15 @@ def get_mount_point():
 
 
 def mount_dir(mount_point, source, target, type, options):
+    """Mounts a directory.
+
+    Args:
+        mount_point (str): The root mount point.
+        source (str): The source path.
+        target (str): The target path relative to the mount point.
+        type (str): The filesystem type.
+        options (int): The mount options.
+    """
     target_path = os.path.join(mount_point, target)
     if libc.mount(
         source.encode(),
@@ -121,6 +168,12 @@ def mount_dir(mount_point, source, target, type, options):
 
 
 def wait_for_device(mount_point, device):
+    """Waits for a device to be mounted.
+
+    Args:
+        mount_point (str): The path to the mount point.
+        device: The device ID of the parent mount.
+    """
     for _ in range(1000):
         if device != os.stat(mount_point).st_dev:
             return
@@ -129,7 +182,12 @@ def wait_for_device(mount_point, device):
 
 
 def mount_root(mount_point, layers):
-    """mount a squash image"""
+    """Mounts the root filesystem using squashfuse.
+
+    Args:
+        mount_point (str): The path to the mount point.
+        layers (list of str): A list of paths to the layer files.
+    """
     device = os.stat(mount_point).st_dev
     args = (
         [b"squashfuse", b"-f"]
@@ -144,6 +202,19 @@ def mount_root(mount_point, layers):
 
 
 def mount_overlay(mount_point, overlay_work_dir, mount_point_root, volumes=None):
+    """Mounts an overlay filesystem using fuse-overlayfs.
+
+    Args:
+        mount_point (str): The path to the mount point.
+        overlay_work_dir (str): The path to the overlay work directory.
+        mount_point_root (str): The path to the root of the lower layers.
+        volumes (list, optional): A list of volumes to mount in the overlay.
+            Defaults to None.
+
+    Returns:
+        tuple: A tuple containing the overlay process object and the temporary
+            work directory object.
+    """
     device = os.stat(mount_point).st_dev
     os.makedirs(overlay_work_dir, exist_ok=True)
     work = tempfile.TemporaryDirectory(
@@ -170,6 +241,13 @@ def mount_overlay(mount_point, overlay_work_dir, mount_point_root, volumes=None)
 
 
 def mount_volumes(mount_point, cwd, volumes):
+    """Mounts volumes into the container.
+
+    Args:
+        mount_point (str): The root mount point of the container.
+        cwd (str): The current working directory.
+        volumes (list): A list of volumes to mount.
+    """
     for source_path, mount_path, flags in volumes:
         mount_dir(
             mount_point,
@@ -192,6 +270,11 @@ STD_VOLUMES = [
 
 
 def mount_std_volumes(mount_point):
+    """Mounts standard volumes like /proc, /dev, etc.
+
+    Args:
+        mount_point (str): The root mount point of the container.
+    """
     for fs_type, path in STD_VOLUMES:
         try:
             if fs_type is None:
@@ -204,8 +287,14 @@ def mount_std_volumes(mount_point):
 
 
 def read_environment_file(filename):
-    """reads a file with key=value-pairs.
-    Returns a dict with the values."""
+    """Reads a file with key=value-pairs.
+
+    Args:
+        filename (str): The path to the environment file.
+
+    Returns:
+        dict: A dictionary of environment variables.
+    """
     result = {}
     with open(filename) as lines:
         for line in lines:
@@ -220,7 +309,17 @@ def read_environment_file(filename):
 
 
 class AbstractConfig:
+    """An abstract base class for container configuration."""
+
     def __init__(self, private_key=None, environment=None):
+        """Initializes the configuration.
+
+        Args:
+            private_key (str, optional): The path to the private key for
+                decryption. Defaults to None.
+            environment (dict or str, optional): A dictionary of environment
+                variables or a path to an environment file. Defaults to None.
+        """
         self.manifest = None
         self.config = None
         self.image_config = None
@@ -237,6 +336,11 @@ class AbstractConfig:
         self.args = []
 
     def parse_args(self, args):
+        """Parses command-line arguments.
+
+        Args:
+            args (list of str): The arguments to parse.
+        """
         while args:
             if args[0] in ("-e", "--env"):
                 if len(args) <= 1:
@@ -271,10 +375,14 @@ class AbstractConfig:
         self.args = args
 
     def get_environment(self):
-        """parses the Env configuration.
+        """Gets the environment variables for the container.
+
         The environment variables are given in the from VAR=value.
-        If no = is provided, the value is taken from the
+        If no value is provided, the value is taken from the
         local environment.
+
+        Returns:
+            dict: A dictionary of environment variables.
         """
         environment = {}
         for env in self.config.get("Env", []):
@@ -285,6 +393,15 @@ class AbstractConfig:
         return environment
 
     def get_userid(self, etc_path=None):
+        """Gets the user and group ID for the container.
+
+        Args:
+            etc_path (str, optional): The path to the /etc directory.
+                Not used. Defaults to None.
+
+        Returns:
+            tuple: A tuple of (user_id, group_id).
+        """
         # user, uid, user:group, uid:gid, uid:group, user:gid
         user = self.config.get("User") or "0:0"
         user, _, group = user.partition(":")
@@ -292,9 +409,19 @@ class AbstractConfig:
 
     @property
     def working_dir(self):
+        """str: The working directory for the container."""
         return self.config.get("WorkingDir") or "/"
 
     def build_commandline(self, args=None):
+        """Builds the command line for the container.
+
+        Args:
+            args (list of str, optional): Additional arguments to append to
+                the command line. Defaults to None.
+
+        Returns:
+            list of str: The command line.
+        """
         entrypoint = self.config.get("Entrypoint", [])
         commandline = self.config.get("Cmd") or []
         if entrypoint:
@@ -306,6 +433,14 @@ class AbstractConfig:
         return commandline
 
     def get_key(self, layer):
+        """Gets the decryption key for a layer.
+
+        Args:
+            layer (dict): The layer descriptor.
+
+        Returns:
+            str: The decryption key.
+        """
         if self.private_key is None:
             self.private_key = os.environ.get("CONCIL_ENCRYPTION_KEY")
             if self.private_key is None:
@@ -343,6 +478,11 @@ class AbstractConfig:
         )
 
     def get_volumes(self):
+        """Gets the volumes for the container.
+
+        Returns:
+            list: A list of volumes to mount.
+        """
         defined_volumes = self.config.get("Volumes") or {}
         if not self.volumes:
             return []
@@ -359,7 +499,18 @@ class AbstractConfig:
 
 
 class LocalConfig(AbstractConfig):
+    """A container configuration loaded from a local directory."""
+
     def __init__(self, manifest_filename, private_key=None, environment=None):
+        """Initializes the local configuration.
+
+        Args:
+            manifest_filename (str): The path to the manifest file or directory.
+            private_key (str, optional): The path to the private key.
+                Defaults to None.
+            environment (dict or str, optional): A dictionary of environment
+                variables or a path to an environment file. Defaults to None.
+        """
         super().__init__(private_key, environment)
         if os.path.isdir(manifest_filename):
             manifest_filename = os.path.join(manifest_filename, "manifest.json")
@@ -374,6 +525,11 @@ class LocalConfig(AbstractConfig):
         self.config = self.image_config.get("config", {})
 
     def get_layers(self):
+        """Gets the layers for the container.
+
+        Returns:
+            list of str: A list of paths to the layer files.
+        """
         layers = {}
         for layer in self.manifest["layers"]:
             digest = layer["digest"]
@@ -395,6 +551,14 @@ class LocalConfig(AbstractConfig):
 
 
 def pivot_root(mount_point):
+    """Changes the root filesystem of the current process.
+
+    Args:
+        mount_point (str): The path to the new root filesystem.
+
+    Returns:
+        int: 0 on success, or a negative error code on failure.
+    """
     fd_oldroot = os.open("/", 0)
     os.chdir(mount_point)
 
@@ -447,6 +611,19 @@ def pivot_root(mount_point):
 
 
 def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None):
+    """The main function for the child process that runs the container.
+
+    Args:
+        config (AbstractConfig): The container configuration.
+        mount_point (str, optional): The primary mount point. Defaults to None.
+        mount_point2 (str, optional): The secondary mount point for overlayfs.
+            Defaults to None.
+        overlay_work_dir (str, optional): The overlay work directory.
+            Defaults to None.
+
+    Returns:
+        int: The exit code of the containerized process.
+    """
     cwd = os.getcwd()
     volumes = config.get_volumes()
     mount_root(mount_point, config.get_layers())
@@ -482,6 +659,16 @@ def run_child(config, mount_point=None, mount_point2=None, overlay_work_dir=None
 
 
 def run(config, overlay_work_dir=None):
+    """Runs a container.
+
+    Args:
+        config (AbstractConfig): The container configuration.
+        overlay_work_dir (str, optional): The overlay work directory.
+            Defaults to None.
+
+    Returns:
+        int: The exit code of the container.
+    """
     if (
         "architecture" in config.image_config
         and config.image_config["architecture"] != current_architecture()
@@ -511,6 +698,12 @@ def run(config, overlay_work_dir=None):
 
 
 def join(pid, args):
+    """Joins the namespaces of a running process.
+
+    Args:
+        pid (int): The process ID to join.
+        args (list of str): The command to execute in the new namespaces.
+    """
     fd = libc.syscall(SYSCALL_PIDFD_OPEN, pid, 0, None, None, None)
     if fd < 0:
         logger.error("pidfd_open failed: %s", ctypes.get_errno())
@@ -524,6 +717,7 @@ def join(pid, args):
 
 
 def main():
+    """The main entry point for the run script."""
     if len(sys.argv) <= 1:
         print("Usage: run.py [config.json] [-p private_key.pem] [-v volume] args")
         return
