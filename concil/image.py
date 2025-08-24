@@ -22,14 +22,33 @@ from .streams import DirTarStream, GZipStream, MergedTarStream
 
 
 class FormatError(Exception):
+    """Exception raised for errors in the input format."""
     pass
 
 
 def encode_base64(bytes):
+    """Encodes bytes in base64.
+
+    Args:
+        bytes (bytes): The bytes to encode.
+
+    Returns:
+        str: The base64-encoded string.
+    """
     return base64.encodebytes(bytes).strip().decode("ASCII")
 
 
 def calculate_digest(filename, unzip=False):
+    """Calculates the SHA-256 digest of a file.
+
+    Args:
+        filename (Path): The path to the file.
+        unzip (bool, optional): Whether to decompress the file with gzip
+            before calculating the digest. Defaults to False.
+
+    Returns:
+        str: The SHA-256 digest, prefixed with "sha256:".
+    """
     hash = sha256()
     with filename.open("rb") as input:
         if unzip:
@@ -50,6 +69,16 @@ DEFAULT_ALGS = {
 
 
 def encrypt(input_stream, encrypted_filename):
+    """Encrypts a stream.
+
+    Args:
+        input_stream: The input stream to encrypt.
+        encrypted_filename (Path): The path to the output encrypted file.
+
+    Returns:
+        tuple: A tuple containing the public encryption data, the encrypted
+            payload, and the SHA-256 hash of the encrypted data.
+    """
     backend = default_backend()
     symkey = os.urandom(32)
     nonce = os.urandom(16)
@@ -89,7 +118,20 @@ def encrypt(input_stream, encrypted_filename):
 
 
 class LayerDescriptor:
+    """Represents a layer in a container image."""
+
     def __init__(self, filename, media_type, digest, annotations=None, size=None):
+        """Initializes a LayerDescriptor.
+
+        Args:
+            filename (Path or str): The path to the layer file.
+            media_type (str): The media type of the layer.
+            digest (str): The digest of the layer.
+            annotations (dict, optional): Annotations for the layer.
+                Defaults to None.
+            size (int, optional): The size of the layer. If not provided, it
+                is calculated from the file. Defaults to None.
+        """
         self.filename = filename
         self.media_type = media_type
         if digest is None:
@@ -109,6 +151,7 @@ class LayerDescriptor:
 
     @property
     def title(self):
+        """str: The title of the layer from the annotations."""
         return self.annotations.get("org.opencontainers.image.title")
 
     @title.setter
@@ -117,6 +160,7 @@ class LayerDescriptor:
 
     @property
     def size(self):
+        """int: The size of the layer."""
         if self.data:
             return len(self.data)
         if self._size is not None:
@@ -125,6 +169,7 @@ class LayerDescriptor:
 
     @property
     def unpacked_digest(self):
+        """str: The digest of the unpacked layer."""
         if self._unpacked_digest is None:
             if self.media_type == "squashfs":
                 self._unpacked_digest = self.digest
@@ -141,11 +186,27 @@ class LayerDescriptor:
         return self._unpacked_digest
 
     def convert(self, media_type):
+        """Sets the media type to convert the layer to.
+
+        Args:
+            media_type (str): The target media type.
+        """
         if self.media_type != media_type:
             self.converted_media_type = media_type
 
     @classmethod
     def from_data(cls, data, media_type, annotations=None):
+        """Creates a LayerDescriptor from data.
+
+        Args:
+            data (bytes): The layer data.
+            media_type (str): The media type of the layer.
+            annotations (dict, optional): Annotations for the layer.
+                Defaults to None.
+
+        Returns:
+            LayerDescriptor: The new LayerDescriptor.
+        """
         hash = sha256(data).hexdigest()
         digest = f"sha256:{hash}"
         result = cls(None, media_type, digest, annotations)
@@ -157,6 +218,14 @@ class LayerDescriptor:
         return result
 
     def as_tar_stream(self):
+        """Returns the layer as a tar stream.
+
+        Returns:
+            A file-like object for the tar stream.
+
+        Raises:
+            NotImplementedError: If the media type is not supported.
+        """
         if self.media_type == "squashfs":
             return subprocess.Popen(
                 [os.path.join(os.path.dirname(__file__), "sqfs2tar"), self.filename],
@@ -175,6 +244,16 @@ class LayerDescriptor:
         raise NotImplementedError()
 
     def export(self, path, merge_with=None):
+        """Exports the layer to a directory.
+
+        Args:
+            path (Path): The destination directory.
+            merge_with (list of LayerDescriptor, optional): A list of layers
+                to merge with. Defaults to None.
+
+        Returns:
+            LayerDescriptor: A new LayerDescriptor for the exported layer.
+        """
         if (
             self.converted_media_type is None
             and not self.encryption_keys
@@ -289,13 +368,27 @@ class LayerDescriptor:
         return result
 
     def read(self):
+        """Reads the content of the layer.
+
+        Returns:
+            bytes: The content of the layer.
+        """
         if self.data:
             return self.data
         return self.filename.read_bytes()
 
 
 class ImageManifest:
+    """Represents an OCI or Docker image manifest."""
+
     def __init__(self, path, manifest_format=None):
+        """Initializes an ImageManifest.
+
+        Args:
+            path (Path or str): The path to the image.
+            manifest_format (str, optional): The manifest format.
+                Defaults to None.
+        """
         self.path = path
         self.schema_version = 2
         self.manifest_format = (
@@ -310,6 +403,15 @@ class ImageManifest:
 
     @classmethod
     def _make_descriptor(cls, path, meta):
+        """Creates a LayerDescriptor from metadata.
+
+        Args:
+            path (Path or str): The path to the image.
+            meta (dict): The layer metadata from the manifest.
+
+        Returns:
+            LayerDescriptor: The new LayerDescriptor.
+        """
         media_type = meta["mediaType"]
         media_type = oci_spec.REVERSED_MEDIA_TYPES.get(media_type, media_type)
         digest = meta["digest"]
@@ -320,6 +422,16 @@ class ImageManifest:
 
     @classmethod
     def from_path(cls, path):
+        """Creates an ImageManifest from a path.
+
+        The path can be a local directory or a Docker URL.
+
+        Args:
+            path (str): The path to the image.
+
+        Returns:
+            ImageManifest: The new ImageManifest.
+        """
         if path.startswith("docker://"):
             hub = DockerHub(path)
             manifest = hub.get_manifest(
@@ -367,11 +479,19 @@ class ImageManifest:
 
     @property
     def configuration(self):
+        """dict: The image configuration."""
         if self._configuration is None:
             self._configuration = json.loads(self.config.read())
         return self._configuration
 
     def export(self, path, manifest_format=None):
+        """Exports the image to a directory.
+
+        Args:
+            path (Path or str): The destination directory.
+            manifest_format (str, optional): The manifest format to use.
+                Defaults to None.
+        """
         path = Path(path)
         path.mkdir()
         if manifest_format is None:
@@ -411,6 +531,17 @@ class ImageManifest:
     def publish(
         self, docker_url, manifest_format=None, root_certificate=None, cosign_key=None
     ):
+        """Publishes the image to a Docker registry.
+
+        Args:
+            docker_url (str): The Docker URL to publish to.
+            manifest_format (str, optional): The manifest format to use.
+                Defaults to None.
+            root_certificate (str, optional): The path to the root certificate
+                for Notary. Defaults to None.
+            cosign_key (str, optional): The key for Cosign signing.
+                Defaults to None.
+        """
         from .store import Store
 
         store = Store(docker_url)

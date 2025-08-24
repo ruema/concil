@@ -1,8 +1,6 @@
-"""
-The streams module provide different classes for stream processing
+"""The streams module provide different classes for stream processing
 various compression formats.
 """
-
 import gzip
 import os
 from pathlib import PurePosixPath
@@ -10,50 +8,90 @@ from tarfile import BLOCKSIZE, TarFile
 
 
 class _Stream:
-    """internal class for memory based file writes"""
+    """Internal class for memory based file writes."""
 
     def __init__(self):
+        """Initializes the stream."""
         self.buf = b""
         self.pos = 0
         self.closed = False
 
     def tell(self):
+        """Returns the current stream position."""
         return self.pos
 
     def write(self, buf):
+        """Writes to the stream.
+
+        Args:
+            buf (bytes): The bytes to write.
+        """
         self.pos += len(buf)
         self.buf += buf
 
     def close(self):
+        """Closes the stream."""
         self.closed = True
 
     def is_available(self, length):
+        """Checks if a certain number of bytes are available for reading.
+
+        Args:
+            length (int): The number of bytes to check for.
+
+        Returns:
+            bool: True if the bytes are available, False otherwise.
+        """
         return self.closed or len(self.buf) >= length
 
     def read_block(self, length):
+        """Reads a block of bytes from the stream.
+
+        Args:
+            length (int): The number of bytes to read.
+
+        Returns:
+            bytes: The bytes read.
+        """
         result = self.buf[:length]
         self.buf = self.buf[length:]
         return result
 
     def __enter__(self):
+        """Enters the context manager."""
         return self
 
     def __exit__(self, *args):
+        """Exits the context manager."""
         return
 
 
 class _AbstractStream:
-    """internal class used as input stream"""
+    """Internal class used as a base for input streams."""
 
     def __init__(self):
+        """Initializes the stream."""
         self._stream = _Stream()
         self._processor = self._process()
 
     def _process(self):
+        """The main processing generator.
+
+        This should be implemented by subclasses.
+        """
         self._stream.close()
         yield
 
     def read(self, length=-1):
+        """Reads from the stream.
+
+        Args:
+            length (int, optional): The number of bytes to read. If -1, reads
+                the entire stream. Defaults to -1.
+
+        Returns:
+            bytes: The bytes read.
+        """
         if length < 0:
             while not self._stream.closed:
                 next(self._processor)
@@ -64,20 +102,29 @@ class _AbstractStream:
             return self._stream.read_block(length)
 
     def __enter__(self):
+        """Enters the context manager."""
         return self
 
     def __exit__(self, *args):
+        """Exits the context manager."""
         return
 
 
 class MergedTarStream(_AbstractStream):
-    """merge multiple tar file streams to one stream"""
+    """Merges multiple tar file streams into one stream."""
 
     def __init__(self, input_streams):
+        """Initializes the MergedTarStream.
+
+        Args:
+            input_streams (list): A list of file-like objects for the input
+                tar streams.
+        """
         self._input_streams = input_streams
         _AbstractStream.__init__(self)
 
     def _process(self):
+        """The main processing generator for merging tar streams."""
         seen = set()
         removed_dirs = set()
         output = TarFile.open(fileobj=self._stream, mode="w:")
@@ -119,13 +166,19 @@ class MergedTarStream(_AbstractStream):
 
 
 class GZipStream(_AbstractStream):
-    """takes an input stream and outputs a gziped stream"""
+    """Takes an input stream and outputs a gzipped stream."""
 
     def __init__(self, input_stream):
+        """Initializes the GZipStream.
+
+        Args:
+            input_stream: A file-like object for the input stream.
+        """
         self._input_stream = input_stream
         _AbstractStream.__init__(self)
 
     def _process(self):
+        """The main processing generator for gzipping a stream."""
         output = gzip.GzipFile(None, "wb", 9, self._stream, mtime=0)
         while True:
             buf = self._input_stream.read(10240)
@@ -139,13 +192,19 @@ class GZipStream(_AbstractStream):
 
 
 class DirTarStream(_AbstractStream):
-    """creates a tar file stream from directory"""
+    """Creates a tar file stream from a directory."""
 
     def __init__(self, input_path):
+        """Initializes the DirTarStream.
+
+        Args:
+            input_path (str or Path): The path to the input directory.
+        """
         self._input_path = input_path
         _AbstractStream.__init__(self)
 
     def _process(self):
+        """The main processing generator for creating a tar stream."""
         output = TarFile.open(fileobj=self._stream, mode="w")
         for name, tarinfo in self.iter_files(output, self._input_path, "/"):
             output.addfile(tarinfo)
@@ -168,10 +227,15 @@ class DirTarStream(_AbstractStream):
         yield
 
     def iter_files(self, output, name, arcname):
-        """Add the file `name` to the archive. `name` may be any type of file
-        (directory, fifo, symbolic link, etc.). If given, `arcname`
-        specifies an alternative name for the file in the archive.
-        Directories are added recursively by default.
+        """Recursively yields files in a directory for tarring.
+
+        Args:
+            output (TarFile): The TarFile object to add files to.
+            name (str): The path to the file or directory.
+            arcname (str): The archive name for the file or directory.
+
+        Yields:
+            tuple: A tuple of (name, tarinfo).
         """
         # Create a TarInfo object from the file.
         tarinfo = output.gettarinfo(name, arcname)

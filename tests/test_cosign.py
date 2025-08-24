@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, ANY
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -50,8 +50,12 @@ def test_verify_blob(mocker):
 
     # Test invalid signature
     from cryptography.exceptions import InvalidSignature
+
     mock_public_key.verify.side_effect = InvalidSignature
-    assert cosign.verify_blob(Path("my_key.pub"), b"my-blob", b"invalid-signature") is False
+    assert (
+        cosign.verify_blob(Path("my_key.pub"), b"my-blob", b"invalid-signature")
+        is False
+    )
 
 
 @pytest.fixture
@@ -68,17 +72,22 @@ def test_cosign_publish(mocker, mock_hub):
     mocker.patch("concil.cosign.generate_signing_blob", return_value=b"signing_blob")
     mocker.patch("concil.cosign.sign_blob", return_value="signature")
     mocker.patch("concil.cosign.generate_signing_config", return_value=b"config_blob")
-    mocker.patch("concil.oci_spec.Descriptor.from_data", side_effect=[
-        oci_spec.Descriptor(media_type="mt1", size=1, digest="signing_digest"),
-        oci_spec.Descriptor(media_type="mt2", size=2, digest="config_digest"),
-    ])
+    mocker.patch(
+        "concil.oci_spec.Descriptor.from_data",
+        side_effect=[
+            oci_spec.Descriptor(media_type="mt1", size=1, digest="signing_digest"),
+            oci_spec.Descriptor(media_type="mt2", size=2, digest="config_digest"),
+        ],
+    )
     mocker.patch("concil.oci_spec.manifest_to_dict", return_value={"a": "b"})
     mocker.patch("json.dumps", return_value="manifest_json")
 
     cs = cosign.Cosign(mock_hub)
     cs.publish("my-manifest-digest", "my-key")
 
-    cosign.generate_signing_blob.assert_called_once_with("my-repo", "my-manifest-digest")
+    cosign.generate_signing_blob.assert_called_once_with(
+        "my-repo", "my-manifest-digest"
+    )
     cosign.sign_blob.assert_called_once_with("my-key", b"signing_blob")
     cosign.generate_signing_config.assert_called_once_with("signing_digest")
     mock_hub.post_manifest.assert_called_once_with(
@@ -86,5 +95,3 @@ def test_cosign_publish(mocker, mock_hub):
         tag="sha256-my-manifest-digest.sig",
         content_type="application/vnd.oci.image.manifest.v1+json",
     )
-
-

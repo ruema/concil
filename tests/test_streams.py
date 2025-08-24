@@ -88,3 +88,39 @@ def test_mergetar():
             ("c/d", 1),
             ("d", 1),
         }
+
+
+def test_dir_tar_stream_empty_dir(tmp_path):
+    """Tests that DirTarStream can handle an empty directory."""
+    dir_path = tmp_path / "empty_dir"
+    dir_path.mkdir()
+
+    dir_stream = DirTarStream(dir_path)
+    with tarfile.open(fileobj=dir_stream, mode="r|") as tar:
+        names = {member.name for member in tar.getmembers()}
+        assert names == {""}
+
+
+def test_merged_tar_stream_three_files(tmp_path):
+    """Tests that MergedTarStream can merge three tar files."""
+    tar1_path = tmp_path / "tar1.tar"
+    with tarfile.open(tar1_path, "w") as tar:
+        tar.addfile(tarfile.TarInfo("file1.txt"), BytesIO(b"content1"))
+
+    tar2_path = tmp_path / "tar2.tar"
+    with tarfile.open(tar2_path, "w") as tar:
+        tar.addfile(tarfile.TarInfo("file2.txt"), BytesIO(b"content2"))
+
+    tar3_path = tmp_path / "tar3.tar"
+    with tarfile.open(tar3_path, "w") as tar:
+        tar.addfile(tarfile.TarInfo("file3.txt"), BytesIO(b"content3"))
+
+    with open(tar1_path, "rb") as f1, open(tar2_path, "rb") as f2, open(
+        tar3_path, "rb"
+    ) as f3:
+        merged_stream = MergedTarStream([f1, f2, f3])
+        with tarfile.open(fileobj=merged_stream, mode="r|") as tar:
+            names = {member.name for member in tar.getmembers()}
+            assert "file1.txt" in names
+            assert "file2.txt" in names
+            assert "file3.txt" in names
