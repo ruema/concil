@@ -42,7 +42,26 @@ def current_architecture():
 
 
 class Descriptor:
+    """Represents an OCI content descriptor.
+
+    Attributes:
+        media_type (str): The media type of the content.
+        size (int): The size of the content in bytes.
+        digest (str): The digest of the content.
+        annotations (dict, optional): Annotations for the descriptor.
+            Defaults to None.
+    """
+
     def __init__(self, media_type, size, digest, annotations=None):
+        """Initializes a Descriptor.
+
+        Args:
+            media_type (str): The media type of the content.
+            size (int): The size of the content in bytes.
+            digest (str): The digest of the content.
+            annotations (dict, optional): Annotations for the descriptor.
+                Defaults to None.
+        """
         self.media_type = media_type
         self.size = size
         self.digest = digest
@@ -50,6 +69,17 @@ class Descriptor:
 
     @classmethod
     def from_data(cls, data, media_type, annotations=None):
+        """Creates a Descriptor from data.
+
+        Args:
+            data (bytes): The data to create the descriptor from.
+            media_type (str): The media type of the data.
+            annotations (dict, optional): Annotations for the descriptor.
+                Defaults to None.
+
+        Returns:
+            Descriptor: The newly created descriptor.
+        """
         hash = sha256(data).hexdigest()
         digest = f"sha256:{hash}"
         result = cls(media_type, len(data), digest, annotations)
@@ -57,6 +87,16 @@ class Descriptor:
 
 
 def descriptor_to_dict(descriptor, manifest_format=MANIFEST_OCI_MEDIA_TYPE):
+    """Converts a Descriptor to a dictionary.
+
+    Args:
+        descriptor (Descriptor): The descriptor to convert.
+        manifest_format (str, optional): The manifest format to use for media
+            types. Defaults to MANIFEST_OCI_MEDIA_TYPE.
+
+    Returns:
+        dict: The dictionary representation of the descriptor.
+    """
     media_type = descriptor.media_type
     result = {
         "mediaType": MEDIA_TYPES[manifest_format].get(media_type, media_type),
@@ -69,6 +109,17 @@ def descriptor_to_dict(descriptor, manifest_format=MANIFEST_OCI_MEDIA_TYPE):
 
 
 def manifest_to_dict(config, layers, manifest_format=MANIFEST_OCI_MEDIA_TYPE):
+    """Creates a manifest dictionary.
+
+    Args:
+        config (Descriptor): The descriptor for the image configuration.
+        layers (list of Descriptor): A list of descriptors for the image layers.
+        manifest_format (str, optional): The manifest format to use.
+            Defaults to MANIFEST_OCI_MEDIA_TYPE.
+
+    Returns:
+        dict: The manifest dictionary.
+    """
     manifest = {
         "schemaVersion": 2,
     }

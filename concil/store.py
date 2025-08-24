@@ -24,6 +24,19 @@ TAR2SQFS = [
 
 
 def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=None):
+    """Constructs a URL from its components.
+
+    Args:
+        scheme (str): The URL scheme.
+        netloc (str): The network location.
+        path (str, optional): The path. Defaults to None.
+        username (str, optional): The username. Defaults to None.
+        password (str, optional): The password. Defaults to None.
+        port (int, optional): The port. Defaults to None.
+
+    Returns:
+        str: The constructed URL.
+    """
     auth = ""
     if "@" not in netloc and username:
         if password:
@@ -42,6 +55,15 @@ def unsplit_url(scheme, netloc, path=None, username=None, password=None, port=No
 
 
 def complete_url_with_auth(url, config):
+    """Completes a URL with authentication information from the config.
+
+    Args:
+        url (urllib.parse.SplitResult): The URL to complete.
+        config (ConcilConfig): The configuration object.
+
+    Returns:
+        urllib.parse.SplitResult: The completed URL.
+    """
     repository = f"{url.hostname}{url.path}"
     auths = dict(config.params.get("auths", {}))
 
@@ -77,7 +99,13 @@ def complete_url_with_auth(url, config):
 
 
 def copyfileobj(fsrc, fdst, length=16 * 1024):
-    """copy data from file-like object fsrc to file-like object fdst"""
+    """Copies data from a file-like object to another.
+
+    Args:
+        fsrc: The source file-like object.
+        fdst: The destination file-like object.
+        length (int, optional): The chunk size. Defaults to 16 * 1024.
+    """
     while True:
         buf = fsrc.read(length)
         if not buf:
@@ -86,6 +114,18 @@ def copyfileobj(fsrc, fdst, length=16 * 1024):
 
 
 def _convert_tar_to_squash(stream, output_filename):
+    """Converts a tar stream to a squashfs file.
+
+    Args:
+        stream: The input tar stream.
+        output_filename (str or Path): The path to the output squashfs file.
+
+    Returns:
+        str: The hex digest of the input tar stream.
+
+    Raises:
+        RuntimeError: If the conversion process fails.
+    """
     digest = hashlib.sha256()
     process = subprocess.Popen(
         TAR2SQFS + ["-fq", str(output_filename)], stdin=subprocess.PIPE
@@ -103,11 +143,29 @@ def _convert_tar_to_squash(stream, output_filename):
 
 
 def convert_tar_gzip(stream, output_filename):
+    """Converts a gzipped tar stream to a squashfs file.
+
+    Args:
+        stream: The input gzipped tar stream.
+        output_filename (str or Path): The path to the output squashfs file.
+
+    Returns:
+        str: The hex digest of the input tar stream.
+    """
     stream = GzipFile(fileobj=stream, mode="rb")
     return _convert_tar_to_squash(stream, output_filename)
 
 
 def convert_tar(stream, output_filename):
+    """Converts a tar stream to a squashfs file.
+
+    Args:
+        stream: The input tar stream.
+        output_filename (str or Path): The path to the output squashfs file.
+
+    Returns:
+        str: The hex digest of the input tar stream.
+    """
     return _convert_tar_to_squash(stream, output_filename)
 
 
@@ -137,7 +195,17 @@ CONFIG_PARAMS = {
 
 
 class ConcilConfig:
+    """Represents the concil configuration."""
+
     def __init__(self, config_path=None):
+        """Initializes the configuration.
+
+        Args:
+            config_path (str or Path, optional): The path to the configuration
+                file. If not provided, it is read from the CONCIL_CONFIG
+                environment variable or defaults to CONFIG_PATH.
+                Defaults to None.
+        """
         if config_path is None:
             config_path = os.environ.get("CONCIL_CONFIG", CONFIG_PATH)
         config_path = Path(config_path).expanduser()
@@ -151,40 +219,55 @@ class ConcilConfig:
 
     @property
     def cafile(self):
-        """returns the cafile as Path if set"""
+        """Path: The path to the CA file, if set."""
         if "cafile" in self.params:
             return Path(self.params["cafile"]).expanduser()
         return None
 
     @property
     def disable_content_trust(self):
+        """bool: Whether content trust is disabled."""
         return self.params.get("disable_content_trust", False)
 
     @property
     def cache_dir(self):
+        """Path: The path to the cache directory."""
         return Path(self.params["cache_dir"]).expanduser()
 
     @property
     def cache_timeout(self):
+        """int: The cache timeout in seconds."""
         return self.params.get("cache_timeout", 604800)
 
     @property
     def content_trust(self):
+        """str: The content trust provider to use ('cosign' or 'notary')."""
         return self.params.get("content_trust", "notary")
 
     @property
     def cosign_path(self):
+        """Path: The path to the cosign directory."""
         return self.path.parent / "cosign"
 
     @property
     def notary_path(self):
+        """Path: The path to the notary directory."""
         return self.cache_dir / "notary"
 
     @property
     def notary_trust_pinning(self):
+        """dict: The notary trust pinning configuration."""
         return self.params.get("trust_pinning", {})
 
     def get_server_info(self, hostname):
+        """Gets server information for a given hostname.
+
+        Args:
+            hostname (str): The hostname to get information for.
+
+        Returns:
+            dict: The server information.
+        """
         remote_servers = self.params.get("remote_servers")
         if remote_servers:
             return remote_servers.get(hostname)
@@ -192,6 +275,15 @@ class ConcilConfig:
 
 
 def get_full_url(url, config):
+    """Gets the full registry URL for a given Docker URL.
+
+    Args:
+        url (urllib.parse.SplitResult): The Docker URL.
+        config (ConcilConfig): The configuration object.
+
+    Returns:
+        str: The full registry URL.
+    """
     info = config.get_server_info(url.hostname)
     if info is None or info.get("registry") is None:
         registry_url = parse_docker_url(unsplit_url("https", url.netloc))
@@ -203,6 +295,15 @@ def get_full_url(url, config):
 
 
 def get_notary_url(url, config):
+    """Gets the notary URL for a given Docker URL.
+
+    Args:
+        url (urllib.parse.SplitResult): The Docker URL.
+        config (ConcilConfig): The configuration object.
+
+    Returns:
+        str: The notary URL.
+    """
     info = config.get_server_info(url.hostname)
     if info is None or info.get("notary") is None:
         if info.get("registry") is None:
@@ -227,7 +328,18 @@ def get_notary_url(url, config):
 
 
 class Store:
+    """A store for container images, handling caching and content trust."""
+
     def __init__(self, url, config=None, verify=None):
+        """Initializes the store.
+
+        Args:
+            url (str): The Docker URL of the image.
+            config (ConcilConfig, optional): The configuration object.
+                If not provided, a default one is created. Defaults to None.
+            verify (bool or str, optional): Whether to verify SSL certificates.
+                Defaults to None.
+        """
         url = parse_docker_url(url)
         self.url = url
         # 'docker://docker.io/library/alpine:latest'
@@ -268,6 +380,7 @@ class Store:
             raise RuntimeError("unknown content trust")
 
     def cache_cleanup(self):
+        """Removes expired files from the cache."""
         cache_time = time.time() - self._cache_timeout
         to_be_removed = []
         for type in ["manifest", "config", "layers"]:
@@ -280,6 +393,14 @@ class Store:
             filename.unlink()
 
     def store_cache(self, type, bytes, digest=None):
+        """Stores data in the cache.
+
+        Args:
+            type (str): The type of data to store (e.g., 'manifest', 'config').
+            bytes (bytes): The data to store.
+            digest (str, optional): The hex digest of the data. If not
+                provided, it is calculated. Defaults to None.
+        """
         if digest is None:
             digest = hashlib.sha256(bytes).hexdigest()
         path = self._cache_dir / type
@@ -288,6 +409,15 @@ class Store:
         (path / digest).write_bytes(bytes)
 
     def get_cache(self, type, digest):
+        """Gets data from the cache.
+
+        Args:
+            type (str): The type of data to get.
+            digest (str): The hex digest of the data.
+
+        Returns:
+            bytes: The cached data.
+        """
         filename = self._cache_dir / type / digest
         logger.debug("trying cache %s", filename)
         bytes = filename.read_bytes()
@@ -296,6 +426,17 @@ class Store:
         return bytes
 
     def get_manifest(self, architecture=None, operating_system=None):
+        """Gets the image manifest.
+
+        Args:
+            architecture (str, optional): The desired architecture.
+                Defaults to None.
+            operating_system (str, optional): The desired operating system.
+                Defaults to None.
+
+        Returns:
+            dict: The image manifest.
+        """
         if self._notary is None:
             manifest = self._hub.get_manifest(
                 accept="application/vnd.docker.distribution.manifest.v2+json"
@@ -335,6 +476,15 @@ class Store:
         return manifest
 
     def _get_blob(self, type, entry):
+        """Gets a blob from the cache or downloads it.
+
+        Args:
+            type (str): The type of the blob.
+            entry (dict): The descriptor for the blob.
+
+        Returns:
+            Path: The path to the blob file.
+        """
         filename = self._cache_dir / type / entry["digest"]
         logging.debug("trying cache %s", filename)
         if filename.is_file():
@@ -396,9 +546,25 @@ class Store:
         return filename.resolve()
 
     def get_config(self, entry):
+        """Gets the image configuration.
+
+        Args:
+            entry (dict): The descriptor for the configuration.
+
+        Returns:
+            dict: The image configuration.
+        """
         filename = self._get_blob("config", entry)
         with filename.open("rb") as input:
             return json.load(input)
 
     def get_layer(self, entry):
+        """Gets an image layer.
+
+        Args:
+            entry (dict): The descriptor for the layer.
+
+        Returns:
+            Path: The path to the layer file.
+        """
         return self._get_blob("layers", entry)
