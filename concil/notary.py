@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 
 def verify_cert(cert, public_key):
+    """Verifies a certificate's signature using a public key.
+
+    Args:
+        cert (x509.Certificate): The certificate to verify.
+        public_key: The public key to use for verification.
+    """
     if cert.signature_algorithm_oid in (
         SignatureAlgorithmOID.RSA_WITH_MD5,
         SignatureAlgorithmOID.RSA_WITH_SHA1,
@@ -85,6 +91,16 @@ def verify_cert(cert, public_key):
 
 
 def generate_certificate(private_key, repository):
+    """Generates a self-signed certificate.
+
+    Args:
+        private_key: The private key to sign the certificate with.
+        repository (str): The repository name to use as the common name in the
+            certificate.
+
+    Returns:
+        x509.Certificate: The generated certificate.
+    """
     subject = issuer = x509.Name(
         [
             x509.NameAttribute(NameOID.COMMON_NAME, repository),
@@ -130,6 +146,17 @@ def generate_certificate(private_key, repository):
 
 
 def parse_outer_dict(data):
+    """Parses the outer dictionary of a TUF metadata file.
+
+    This function is a custom parser for the TUF metadata format, which is
+    not standard JSON.
+
+    Args:
+        data (bytes): The raw bytes of the metadata file.
+
+    Returns:
+        dict: A dictionary containing the parsed data.
+    """
     parts = iter(re.findall(rb'"(?:[^"]|\\")*"|[{}\[\]]|[^{}\[\]"]+', data))
     if next(parts) != b"{":
         raise ValueError('"{" expected.')
@@ -165,6 +192,13 @@ def parse_outer_dict(data):
 
 
 def verify_ecdsa(public_key, data, sig):
+    """Verifies an ECDSA signature.
+
+    Args:
+        public_key: The public key to use for verification.
+        data (bytes): The data that was signed.
+        sig (bytes): The signature to verify.
+    """
     key_size = (public_key.key_size + 7) // 8
     r = int.from_bytes(sig[:key_size], "big")
     s = int.from_bytes(sig[key_size:], "big")
@@ -172,6 +206,15 @@ def verify_ecdsa(public_key, data, sig):
 
 
 def sign_ecdsa(private_key, data):
+    """Signs data using ECDSA.
+
+    Args:
+        private_key: The private key to use for signing.
+        data (bytes): The data to sign.
+
+    Returns:
+        bytes: The ECDSA signature.
+    """
     key_size = (private_key.key_size + 7) // 8
     sig = private_key.sign(data, ec.ECDSA(hashes.SHA256()))
     r, s = decode_dss_signature(sig)
@@ -179,10 +222,24 @@ def sign_ecdsa(private_key, data):
 
 
 def verify_eddsa(public_key, data, sig):
+    """Verifies an EdDSA signature.
+
+    Args:
+        public_key: The public key to use for verification.
+        data (bytes): The data that was signed.
+        sig (bytes): The signature to verify.
+    """
     public_key.verify(sig, data)
 
 
 def verify_rsapss(public_key, data, sig):
+    """Verifies an RSAPSS signature.
+
+    Args:
+        public_key: The public key to use for verification.
+        data (bytes): The data that was signed.
+        sig (bytes): The signature to verify.
+    """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -195,6 +252,15 @@ def verify_rsapss(public_key, data, sig):
 
 
 def sign_rsapss(private_key, data):
+    """Signs data using RSAPSS.
+
+    Args:
+        private_key: The private key to use for signing.
+        data (bytes): The data to sign.
+
+    Returns:
+        bytes: The RSAPSS signature.
+    """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -213,6 +279,16 @@ SIGNATURE_METHODS = {
 
 
 def decode_signed_json(public_keys, data, min_version=0):
+    """Decodes and verifies a signed JSON object.
+
+    Args:
+        public_keys (dict): A dictionary of public keys, indexed by key ID.
+        data (bytes): The raw bytes of the signed JSON object.
+        min_version (int, optional): The minimum acceptable version. Defaults to 0.
+
+    Returns:
+        dict: The decoded and verified signed data.
+    """
     result = parse_outer_dict(data)
     signatures = json.loads(result[b'"signatures"'])
     signed = result[b'"signed"']
@@ -230,10 +306,27 @@ def decode_signed_json(public_keys, data, min_version=0):
 
 
 def encode_json(data):
+    """Encodes a dictionary to a JSON string in a canonical format.
+
+    Args:
+        data (dict): The dictionary to encode.
+
+    Returns:
+        bytes: The JSON-encoded data.
+    """
     return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf8")
 
 
 def encode_signed_json(private_keys, data):
+    """Signs and encodes a JSON object.
+
+    Args:
+        private_keys (dict): A dictionary of private keys, indexed by key ID.
+        data (dict): The data to sign and encode.
+
+    Returns:
+        bytes: The signed and encoded JSON object.
+    """
     data = encode_json(data)
     signatures = []
     for key_id, key in private_keys.items():
@@ -250,6 +343,14 @@ def encode_signed_json(private_keys, data):
 
 
 def generate_key_dict(public_key):
+    """Generates a TUF key dictionary from a public key.
+
+    Args:
+        public_key: The public key.
+
+    Returns:
+        tuple: A tuple containing the key dictionary and the key ID.
+    """
     keyval = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     key_dict = {
         "keytype": "ecdsa",
@@ -263,17 +364,37 @@ def generate_key_dict(public_key):
 
 
 class PrivateKeyStore(object):
+    """A store for private keys, persisted on disk."""
+
     def __init__(self, path):
+        """Initializes the private key store.
+
+        Args:
+            path (str or Path): The path to the directory where keys are stored.
+        """
         self.path = Path(path).expanduser()
         self.root = None
         self.keys = {}
 
     def _generate_key(self):
+        """Generates a new ECDSA private key.
+
+        Returns:
+            tuple: A tuple containing the private key object, the key dictionary,
+                and the key ID.
+        """
         key = ec.generate_private_key(ec.SECP256R1(), default_backend())
         key_dict, key_id = generate_key_dict(key.public_key())
         return key, key_dict, key_id
 
     def get_root(self):
+        """Gets the root key from the store.
+
+        If a root key doesn't exist, a new one is generated.
+
+        Returns:
+            The root private key.
+        """
         if self.root is None:
             for filename in self.path.glob("*.key"):
                 lines = filename.read_bytes().splitlines()
@@ -288,6 +409,16 @@ class PrivateKeyStore(object):
         return self.root
 
     def generate_key(self, key_type, repository):
+        """Generates and stores a new private key.
+
+        Args:
+            key_type (str): The type of key to generate (e.g., 'root', 'targets').
+            repository (str): The repository name to associate with the key.
+
+        Returns:
+            tuple: A tuple containing the private key object, the key dictionary,
+                and the key ID.
+        """
         key, key_dict, key_id = self._generate_key()
         while True:
             print(f"Enter passphrase for new {key_type} key with ID {key_id[:7]}:")
@@ -314,6 +445,15 @@ class PrivateKeyStore(object):
         return key, key_dict, key_id
 
     def get(self, key_id, key_type):
+        """Retrieves a private key from the store.
+
+        Args:
+            key_id (str): The ID of the key to retrieve.
+            key_type (str): The type of the key.
+
+        Returns:
+            The private key object.
+        """
         if key_id not in self.keys:
             try:
                 lines = (self.path / f"{key_id}.key").read_bytes().splitlines()
@@ -337,6 +477,14 @@ class PrivateKeyStore(object):
 
 
 def load_key(key):
+    """Loads a public key from a TUF key dictionary.
+
+    Args:
+        key (dict): The TUF key dictionary.
+
+    Returns:
+        The public key object.
+    """
     data = base64url_decode(key["keyval"]["public"])
     if key["keytype"] in ["ecdsa-x509", "rsa-x509"]:
         cert = x509.load_pem_x509_certificate(data, backend=default_backend())
@@ -356,6 +504,15 @@ HASH_ALGORITHMS = {
 
 
 def check_hashes(bytes, hashes):
+    """Checks if the hashes of a byte string match a given set of hashes.
+
+    Args:
+        bytes (bytes): The byte string to check.
+        hashes (dict): A dictionary of hashes to check against.
+
+    Returns:
+        bool: True if the hashes match, False otherwise.
+    """
     if "length" in hashes and len(bytes) != hashes["length"]:
         return False
     hash_found = False
@@ -370,6 +527,14 @@ def check_hashes(bytes, hashes):
 
 
 def generate_hashes(bytes):
+    """Generates a dictionary of hashes for a byte string.
+
+    Args:
+        bytes (bytes): The byte string to hash.
+
+    Returns:
+        dict: A dictionary of hashes.
+    """
     result = {"hashes": {}, "length": len(bytes)}
     for hash_name, hash_function in HASH_ALGORITHMS.items():
         result["hashes"][hash_name] = (
@@ -379,29 +544,58 @@ def generate_hashes(bytes):
 
 
 class Metafile(object):
+    """A base class for TUF metafiles."""
+
     INITIAL_BYTES = b"{}"
 
     def __init__(self, bytes=None):
+        """Initializes the metafile.
+
+        Args:
+            bytes (bytes, optional): The raw bytes of the metafile. If not
+                provided, an empty metafile is created. Defaults to None.
+        """
         self.dirty = not bytes
         self.bytes = bytes or self.INITIAL_BYTES
         self.data = json.loads(self.bytes)
 
     def version(self):
+        """Returns the version of the metafile."""
         return self.data["signed"]["version"]
 
     def expires(self):
+        """Returns the expiration date of the metafile."""
         return dateutil.parser.parse(self.data["signed"]["expires"])
 
     def hash(self):
+        """Returns the SHA-256 hash of the metafile."""
         return hashlib.sha256(self.bytes).hexdigest()
 
     def hashes(self):
+        """Returns a dictionary of hashes for the metafile."""
         return generate_hashes(self.bytes)
 
     def check_hashes(self, hashes):
+        """Checks if the hashes of the metafile match a given set of hashes.
+
+        Args:
+            hashes (dict): A dictionary of hashes to check against.
+
+        Returns:
+            bool: True if the hashes match, False otherwise.
+        """
         return check_hashes(self.bytes, hashes)
 
     def verify_sign(self, root):
+        """Verifies the signature of the metafile.
+
+        Args:
+            root (Root): The root metafile containing the public keys.
+
+        Raises:
+            RuntimeError: If no signature is found or no key is found for the
+                signatures.
+        """
         public_keys = root.get_keys(self.name)
         result = parse_outer_dict(self.bytes)
         signatures = self.data["signatures"]
@@ -418,6 +612,14 @@ class Metafile(object):
             SIGNATURE_METHODS[method](key, signed, sig)
 
     def to_bytes(self, private_keys):
+        """Signs and serializes the metafile to bytes.
+
+        Args:
+            private_keys (dict): A dictionary of private keys to use for signing.
+
+        Returns:
+            bytes: The signed and serialized metafile.
+        """
         self.data["signed"]["expires"] = (
             datetime.datetime.utcnow()
             + datetime.timedelta(seconds=self.EXPIRATION_DELAY)
@@ -430,29 +632,43 @@ class Metafile(object):
 
 
 class Timestamp(Metafile):
+    """A TUF timestamp metafile."""
+
     name = "timestamp"
 
     def __getitem__(self, value):
+        """Gets a value from the meta dictionary."""
         return self.data["signed"]["meta"][value]
 
 
 class Snapshot(Metafile):
+    """A TUF snapshot metafile."""
+
     name = "snapshot"
     EXPIRATION_DELAY = 3 * 365 * 24 * 3600  # seconds
     INITIAL_BYTES = b'{"signed":{"_type":"Snapshot","meta":{}}}'
 
     def __getitem__(self, key):
+        """Gets a value from the meta dictionary."""
         return self.data["signed"]["meta"][key]
 
     def __setitem__(self, key, value):
+        """Sets a value in the meta dictionary."""
         self.data["signed"]["meta"][key] = value.hashes()
 
     def update(self, value):
+        """Updates the meta dictionary with the hashes of another metafile.
+
+        Args:
+            value (Metafile): The metafile to get the hashes from.
+        """
         self.data["signed"]["meta"][value.name] = value.hashes()
         self.dirty = True
 
 
 class Root(Metafile):
+    """A TUF root metafile."""
+
     name = "root"
     EXPIRATION_DELAY = 10 * 365 * 24 * 3600  # seconds
     INITIAL_BYTES = (
@@ -460,6 +676,14 @@ class Root(Metafile):
     )
 
     def get_keys(self, role):
+        """Gets the public keys for a given role.
+
+        Args:
+            role (str): The role to get the keys for.
+
+        Returns:
+            dict: A dictionary of public keys, indexed by key ID.
+        """
         roles = self.data["signed"]["roles"]
         keys = self.data["signed"]["keys"]
         if role not in roles:
@@ -468,6 +692,12 @@ class Root(Metafile):
         return {k: keys[k] for k in keyids}
 
     def verify_trust_pinning(self, config, repository):
+        """Verifies the root metafile against trust pinning configuration.
+
+        Args:
+            config (dict): The trust pinning configuration.
+            repository (str): The repository name.
+        """
         if "trust_pinning" not in config:
             # without trust_pinning, verification succeeds always
             return
@@ -511,6 +741,16 @@ class Root(Metafile):
             raise RuntimeError("tofu disabled")
 
     def add_key(self, key_id, key_dict, role):
+        """Adds a key to the root metafile.
+
+        Args:
+            key_id (str): The ID of the key to add.
+            key_dict (dict): The TUF key dictionary.
+            role (str): The role to add the key to.
+
+        Returns:
+            str: The ID of the added key.
+        """
         if key_id is None:
             key_id = hashlib.sha256(encode_json(key_dict)).hexdigest()
         roles = self.data["signed"]["roles"]
@@ -523,6 +763,15 @@ class Root(Metafile):
         return key_id
 
     def add_root_key(self, private_key, repository):
+        """Adds a root key from a private key.
+
+        Args:
+            private_key: The private key to generate the root key from.
+            repository (str): The repository name.
+
+        Returns:
+            str: The ID of the added root key.
+        """
         certificate = generate_certificate(private_key, repository)
         keyval = certificate.public_bytes(Encoding.PEM)
         key_dict = {
@@ -535,6 +784,15 @@ class Root(Metafile):
         return self.add_key(None, key_dict, "root")
 
     def add_root_certificate(self, private_key, certificate):
+        """Adds a root key from a certificate file.
+
+        Args:
+            private_key: The private key corresponding to the certificate.
+            certificate (str or Path): The path to the certificate file.
+
+        Returns:
+            str: The ID of the added root key.
+        """
         with open(certificate, "rb") as input:
             keyval = input.read()
         # check data format
@@ -556,31 +814,70 @@ class Root(Metafile):
 
 
 class Targets(Metafile):
+    """A TUF targets metafile."""
+
     name = "targets"
     EXPIRATION_DELAY = 3 * 365 * 24 * 3600  # seconds
     INITIAL_BYTES = b'{"signed":{"_type":"Targets","delegations":{"keys":{},"roles":[]},"targets":{}}}'
 
     def get_keys(self, role):
+        """Gets the public keys for a given delegated role.
+
+        Args:
+            role (str): The role to get the keys for.
+
+        Returns:
+            dict: A dictionary of public keys, indexed by key ID.
+        """
         roles = self.data["signed"]["delegations"]["roles"]
         keys = self.data["signed"]["delegations"]["keys"]
         keyids = next(r["keyids"] for r in roles if r["name"] == role)
         return {k: keys[k] for k in keyids}
 
     def __getitem__(self, target):
+        """Gets the hashes for a target."""
         return self.data["signed"]["targets"][target]
 
     def add_target_hashes(self, target, hashes):
+        """Adds the hashes for a target.
+
+        Args:
+            target (str): The name of the target.
+            hashes (dict): A dictionary of hashes for the target.
+        """
         self.data["signed"]["targets"][target] = hashes
         self.dirty = True
 
 
 class JsonStore(object):
+    """A store for TUF metadata files, backed by a Docker registry."""
+
     def __init__(self, path, url, config, verify=None):
+        """Initializes the JSON store.
+
+        Args:
+            path (Path): The local path to cache metadata files.
+            url (str): The URL of the Docker registry.
+            config (dict): The configuration dictionary.
+            verify (bool or str, optional): Whether to verify SSL certificates.
+                Defaults to None.
+        """
         self.config = config
         self._hub = DockerHub(url, verify=verify)
         self.path = path / self._hub.repository
 
     def get(self, metafileclass, hashes=None, name=None):
+        """Gets a metafile from the store.
+
+        Args:
+            metafileclass (type): The class of the metafile to get.
+            hashes (dict, optional): The expected hashes of the metafile.
+                Defaults to None.
+            name (str, optional): The name of the metafile. Defaults to None.
+
+        Returns:
+            Metafile: The requested metafile.
+        """
         type = name or metafileclass.name
         filename = self.path / f"{type}.json"
         print(filename)
@@ -632,14 +929,24 @@ class JsonStore(object):
         return metafile
 
     def get_timestamp_key(self):
+        """Gets the timestamp key from the registry."""
         url = f"{self._hub.url}/_trust/tuf/timestamp.key"
         return self._hub.request("GET", url).json()
 
     def get_snapshot_key(self):
+        """Gets the snapshot key from the registry."""
         url = f"{self._hub.url}/_trust/tuf/snapshot.key"
         return self._hub.request("GET", url).json()
 
     def publish(self, datas):
+        """Publishes metadata files to the registry.
+
+        Args:
+            datas (list of Metafile): The metadata files to publish.
+
+        Returns:
+            requests.Response: The response from the registry.
+        """
         upload_files = OrderedDict()
         for data in sorted(datas, key=lambda d: d.name):
             upload_files[data.name] = (
@@ -653,6 +960,14 @@ class JsonStore(object):
 
 
 def update_targets(delegate_targets, store, snapshot, targets):
+    """Recursively updates the delegated targets.
+
+    Args:
+        delegate_targets (dict): A dictionary to store the delegated targets.
+        store (JsonStore): The JSON store to use for fetching metafiles.
+        snapshot (Snapshot): The snapshot metafile.
+        targets (Targets): The targets metafile.
+    """
     roles = targets.data["signed"]["delegations"]["roles"]
     for role in roles:
         name = role["name"]
@@ -666,6 +981,8 @@ def update_targets(delegate_targets, store, snapshot, targets):
 
 
 class Notary(object):
+    """A client for interacting with Notary."""
+
     CONFIG_PATH = "~/.notary/config.json"
     CONFIG_PARAMS = {
         "trust_dir": "~/.notary",
@@ -675,6 +992,17 @@ class Notary(object):
     }
 
     def __init__(self, url, initialize=False, config=CONFIG_PATH, verify=None):
+        """Initializes a Notary client.
+
+        Args:
+            url (str): The URL of the repository.
+            initialize (bool, optional): Whether to initialize a new repository.
+                Defaults to False.
+            config (str or dict, optional): The path to a configuration file
+                or a configuration dictionary. Defaults to CONFIG_PATH.
+            verify (bool or str, optional): Whether to verify SSL certificates.
+                Defaults to None.
+        """
         if not isinstance(config, dict):
             try:
                 with Path(config).expanduser().open(encoding="utf8") as config_file:
@@ -719,15 +1047,39 @@ class Notary(object):
         self.delegate_targets = delegate_targets
 
     def add_target(self, target, filename, role=None):
+        """Adds a target from a file.
+
+        Args:
+            target (str): The name of the target.
+            filename (str or Path): The path to the file.
+            role (str, optional): The delegated role to add the target to.
+                Defaults to None.
+        """
         bytes = Path(filename).read_bytes()
         hashes = generate_hashes(bytes)
         self.add_target_hashes(target, hashes)
 
     def add_target_hashes(self, target, hashes, role=None):
+        """Adds a target with the given hashes.
+
+        Args:
+            target (str): The name of the target.
+            hashes (dict): A dictionary of hashes for the target.
+            role (str, optional): The delegated role to add the target to.
+                Defaults to None.
+        """
         targets = self.targets if role is None else self.delegate_targets[role]
         targets.add_target_hashes(target, hashes)
 
     def get_digest_for_tag(self, tag):
+        """Gets the digest for a given tag.
+
+        Args:
+            tag (str): The tag to get the digest for.
+
+        Returns:
+            tuple: A tuple containing the digest and the target metadata.
+        """
         targets = self.targets.data["signed"]["targets"]
         try:
             target = targets[tag]
@@ -743,6 +1095,16 @@ class Notary(object):
         return f"sha256:{hex_hash}", target
 
     def _get_keys(self, role):
+        """Gets the private keys for a given role.
+
+        If no keys are found for the role, a new key is generated.
+
+        Args:
+            role (str): The role to get the keys for.
+
+        Returns:
+            dict: A dictionary of private keys, indexed by key ID.
+        """
         key_ids = self.root.get_keys(role)
         if key_ids:
             keys = {
@@ -758,6 +1120,15 @@ class Notary(object):
         return keys
 
     def publish(self, root_certificate=None):
+        """Publishes the updated metadata to the registry.
+
+        Args:
+            root_certificate (str or Path, optional): The path to a root
+                certificate to add. Defaults to None.
+
+        Returns:
+            requests.Response: The response from the registry.
+        """
         # TODO: delgate targets
         updates = []
         if self.targets.dirty:
