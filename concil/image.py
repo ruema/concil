@@ -17,12 +17,14 @@ from jwcrypto.common import base64url_encode
 
 from . import oci_spec
 from .dockerhub import DockerHub, DockerPath
+from .squashfs import SquashTarStream
 from .store import IMAGE_CONVERTERS
 from .streams import DirTarStream, GZipStream, MergedTarStream
 
 
 class FormatError(Exception):
     """Exception raised for errors in the input format."""
+
     pass
 
 
@@ -227,10 +229,7 @@ class LayerDescriptor:
             NotImplementedError: If the media type is not supported.
         """
         if self.media_type == "squashfs":
-            return subprocess.Popen(
-                [os.path.join(os.path.dirname(__file__), "sqfs2tar"), self.filename],
-                stdout=subprocess.PIPE,
-            ).stdout
+            return SquashTarStream(self.filename)
         if self.media_type == "dir":
             return DirTarStream(self.filename)
         elif self.data:
